@@ -15,6 +15,7 @@ import { readProfile } from './profile.ts';
 import { runCheck, type Target } from './run.ts';
 import { runSuite, teardownSuitePods } from './suite.ts';
 import { formatTimings } from './timings.ts';
+import { runbookPush, runbookRollback } from '../sync/runbookPush.ts';
 
 const USAGE = `usage: check <command> <id> [options]
 
@@ -33,6 +34,13 @@ const USAGE = `usage: check <command> <id> [options]
   postmortem <id>         write docs/postmortems/<date>-<N>-<slug>.md
   runbook <id>            write docs/runbooks/<date>-<N>-<slug>.md
                           (both only after a confirmed gate pass)
+  runbook push N [--plan] upload the server/ files of main...issue/N to live:
+                          each is pulled into .dev/runbook-N/home and must
+                          still be main's version (refused on drift), then
+                          pushed with a backup and a journal line, stopping at
+                          the first failure; --plan prints the set and diffs
+                          and writes nothing; needs the committed runbook
+  runbook rollback N      print the restore commands for the last push run
   suite [--jar NAME] [--heap SIZE] [--timeout S] [--target dev|live]
                           every committed check: bare-text first, then one pod
                           per fixture profile, torn down after; prints and
@@ -45,16 +53,18 @@ checks/<id>/profile.json gives the kind: {"kind": "e2e"} or {"kind":
 or --issue N. The project is $MC_HOME (default: the harness root).
 Exit codes: 0 passed, 1 failed (recorded), 2 refused.`;
 
-type Opts = { id?: string; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number; jar?: string; heap?: string; target: Target };
+type Opts = { id?: string; sub?: 'push' | 'rollback'; plan: boolean; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number; jar?: string; heap?: string; target: Target };
 
 function parse(argv: string[]): { cmd: string; o: Opts } {
-  const o: Opts = { pod: 'dev', fresh: false, confirm: true, timeout: 600, target: 'dev' };
+  const o: Opts = { plan: false, pod: 'dev', fresh: false, confirm: true, timeout: 600, target: 'dev' };
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '-h' || cmd === '--help') fail(USAGE);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     const val = () => rest[++i] ?? fail(`${a} needs a value\n${USAGE}`);
-    if (a === '--issue') o.issue = val();
+    if (cmd === 'runbook' && o.id === undefined && o.sub === undefined && (a === 'push' || a === 'rollback')) o.sub = a;
+    else if (a === '--plan') o.plan = true;
+    else if (a === '--issue') o.issue = val();
     else if (a === '--pod') o.pod = val();
     else if (a === '--timeout') o.timeout = Number(val());
     else if (a === '--fresh') o.fresh = true;
@@ -164,6 +174,14 @@ function main(argv: string[]) {
     process.exitCode = failed.length > 0 ? 1 : 0;
     return;
   }
+  if (o.sub) {
+    const n = Number(o.id);
+    if (!Number.isInteger(n) || n <= 0) fail(`runbook ${o.sub} needs an issue number\n${USAGE}`);
+    if (o.sub === 'push') runbookPush(root, n, o.plan);
+    else say(runbookRollback(root, n).join('\n'));
+    return;
+  }
+  if (o.plan) fail(`--plan is for runbook push\n${USAGE}`);
   if (o.id === undefined) fail(`${cmd} needs a check id\n${USAGE}`);
   if (o.target === 'live' && cmd !== 'run') fail(`${cmd} works on dev records only; --target live is for run and suite`);
   const issue = issueOf(root, o.issue);
