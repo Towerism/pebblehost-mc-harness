@@ -72,6 +72,7 @@ export function matchRule(rules: Rule[], rel: string, classes: RuleClass[] = ['s
 // An rclone exclude file (bin/mc MC_EXCLUDE_FILE) for the given classes, for
 // a transfer of `base` (rclone matches relative to the path transferred):
 // anchored rules are made relative to base, and dropped when outside it.
+// {} and [] are rclone glob syntax but literal in rules: escaped.
 export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): string {
   const out: string[] = [];
   const b = base.replace(/^\/+|\/+$/g, '');
@@ -83,6 +84,7 @@ export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): 
     else if (p.startsWith(`${b}/`)) pat = `/${p.slice(b.length + 1)}`;
     else if (ruleRegex(r.pattern, true).test(b)) pat = '';
     else continue;
+    pat = pat.replace(/[{}[\]]/g, '\\$&');
     // A directory-only rule leaves a file of that name alone.
     out.push(...(pat === '' ? ['/**'] : r.pattern.endsWith('/') ? [`${pat}/**`] : [pat, `${pat}/**`]));
   }
