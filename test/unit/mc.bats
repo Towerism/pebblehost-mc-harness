@@ -374,7 +374,7 @@ make_worktree() {
   [ ! -e "$STUB_LOG" ]
 }
 
-@test "MC_EXCLUDE_FILE reaches every listing and transfer as --exclude-from" {
+@test "MC_EXCLUDE_FILE reaches every listing and transfer as --exclude-from, in exact case" {
   printf 'logs/**\n*.db\n' >"$BATS_TEST_TMPDIR/excl"
   export MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/excl
   run "$mc" ls plugins
@@ -384,6 +384,8 @@ make_worktree() {
   run "$mc" diff plugins
   [ "$(grep -c "^rclone lsf .*--exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -ge 2 ]
   [ "$(grep -c "^rclone copyto .*--exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -eq 2 ]
+  # runbook push's sibling excludes name exact entries: no --ignore-case.
+  run ! grep -q -- '--ignore-case' "$STUB_LOG"
   export MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/missing
   run "$mc" ls plugins
   [ "$status" -eq 2 ]
@@ -393,7 +395,7 @@ make_worktree() {
 @test "without MC_EXCLUDE_FILE no filter is passed" {
   run "$mc" pull plugins
   [ "$status" -eq 0 ]
-  run ! grep -q -- '--exclude-from' "$STUB_LOG"
+  run ! grep -q -- '--exclude-from\|--ignore-case' "$STUB_LOG"
 }
 
 @test "ls -R lists every file below; -R works only with ls" {
@@ -403,4 +405,51 @@ make_worktree() {
   run "$mc" pull plugins -R
   [ "$status" -eq 2 ]
   [[ $output == *"-l and -R work only with ls"* ]]
+}
+
+@test "MC_FILTER_FILE reaches ls listings as --filter-from, and nothing else" {
+  printf -- '+ /plugins/**\n- **\n' >"$BATS_TEST_TMPDIR/filter"
+  MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" ls -R -l
+  [ "$status" -eq 0 ]
+  grep -q "^rclone lsf -R --files-only --format stp --separator | --filter-from $BATS_TEST_TMPDIR/filter pebble:$" "$STUB_LOG"
+  # Listings only: pull's snapshot and copy, diff and push take no filter.
+  MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" pull plugins
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--filter-from' "$STUB_LOG")" -eq 1 ]
+  MC_FILTER_FILE=$BATS_TEST_TMPDIR/missing run "$mc" ls
+  [ "$status" -eq 2 ]
+  [[ $output == *"MC_FILTER_FILE $BATS_TEST_TMPDIR/missing not found"* ]]
+}
+
+@test "fetch copies the paths on stdin into server/ and records nothing; paths leaving the root are refused" {
+  run "$mc" fetch <<<$'plugins/a.yml\nplugins/B/c.yml'
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'fetched 2 files -> server/'* ]]
+  grep -q '^rclone copy --files-from-raw .* --no-traverse --ignore-times pebble: '"$MC_HOME/server"'$' "$STUB_LOG"
+  [ ! -e "$MC_HOME/.mc" ]
+  for bad in '../x' 'plugins/../../x' '/etc/passwd'; do
+    run "$mc" fetch <<<"$bad"
+    [ "$status" -eq 2 ]
+    [[ $output == *"fetch: $bad leaves the server root"* ]]
+  done
+  run "$mc" fetch plugins </dev/null
+  [ "$status" -eq 2 ]
+  [[ $output == *"fetch takes its paths on stdin"* ]]
+}
+
+@test "MC_EXCLUDE_IGNORE_CASE=1 adds --ignore-case to the exclude and ls filter files, as sync-rules match" {
+  printf 'logs/**\n' >"$BATS_TEST_TMPDIR/excl"
+  printf -- '+ /plugins/**\n- **\n' >"$BATS_TEST_TMPDIR/filter"
+  export MC_EXCLUDE_IGNORE_CASE=1
+  MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/excl run "$mc" pull plugins
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "^rclone copyto --ignore-times --ignore-case --exclude-from $BATS_TEST_TMPDIR/excl" "$STUB_LOG")" -eq 1 ]
+  MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" ls -R -l
+  [ "$status" -eq 0 ]
+  grep -q -- "--ignore-case --filter-from $BATS_TEST_TMPDIR/filter pebble:$" "$STUB_LOG"
+  # Without a filter file it adds nothing.
+  : >"$STUB_LOG"
+  run "$mc" pull plugins
+  run ! grep -q -- '--ignore-case' "$STUB_LOG"
 }

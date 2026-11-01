@@ -95,6 +95,19 @@ gate_issue() {
   [ "$(live 'cat plugins/Eco/config.yml')" = 'rate: 1' ]
 }
 
+@test "a new directory named like a live sibling in another case still goes up" {
+  live 'mkdir -p plugins/Eco/Lang && printf "L\n" >plugins/Eco/Lang/x.yml'
+  printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
+  mkdir -p "$MC_HOME/server/plugins/Eco/lang"
+  printf 'hi: y\n' >"$MC_HOME/server/plugins/Eco/lang/en.yml"
+  gate_issue
+  run "$check" runbook push 9 </dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(live 'cat plugins/Eco/lang/en.yml')" = 'hi: y' ]
+  [ "$(live 'cat plugins/Eco/Lang/x.yml')" = 'L' ]
+}
+
 @test "push refuses drift on main or on live since the cut, before writing anything" {
   printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
   gate_issue

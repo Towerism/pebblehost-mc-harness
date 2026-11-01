@@ -54,12 +54,14 @@ const glob = (p: string) =>
 // everything below a matching directory.
 // A pattern ending in / matches directories only: for a file path, only
 // what lies below such a directory (`dir` says rel is a directory).
+// Case is ignored, as the private guard ignores it: plugins name the same
+// data PlayerData/ or playerdata/.
 export function ruleRegex(pattern: string, dir = false): RegExp {
   const p = pattern.replace(/\/+$/, '');
   const anchored = p.includes('/');
   const body = glob(p.replace(/^\/+/, ''));
   const below = pattern.endsWith('/') && !dir ? '/.*' : '(/.*)?';
-  return new RegExp(`${anchored ? '^' : '(^|/)'}${body}${below}$`);
+  return new RegExp(`${anchored ? '^' : '(^|/)'}${body}${below}$`, 'i');
 }
 
 // The first rule of the given classes matching a server-relative path.
@@ -70,6 +72,10 @@ export function matchRule(rules: Rule[], rel: string, classes: RuleClass[] = ['s
 // An rclone exclude file (bin/mc MC_EXCLUDE_FILE) for the given classes, for
 // a transfer of `base` (rclone matches relative to the path transferred):
 // anchored rules are made relative to base, and dropped when outside it.
+// \, {} and [] are rclone glob syntax but literal in rules: escaped. rclone's
+// **/ needs at least one directory, so it becomes {**/,} to match zero too.
+// Rules ignore case: callers pass MC_EXCLUDE_IGNORE_CASE=1 (RULES_CASE in
+// sync.ts), so bin/mc adds --ignore-case.
 export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): string {
   const out: string[] = [];
   const b = base.replace(/^\/+|\/+$/g, '');
@@ -77,10 +83,11 @@ export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): 
     const p = r.pattern.replace(/\/+$/, '').replace(/^\/+/, '');
     let pat: string;
     if (!r.pattern.replace(/\/+$/, '').includes('/')) pat = p;
-    else if (b === '') pat = `/${p}`;
+    else if (b === '' || p.startsWith('**/')) pat = `/${p}`;
     else if (p.startsWith(`${b}/`)) pat = `/${p.slice(b.length + 1)}`;
     else if (ruleRegex(r.pattern, true).test(b)) pat = '';
     else continue;
+    pat = pat.replace(/[\\{}[\]]/g, '\\$&').replace(/\/\*\*\//g, '/{**/,}');
     // A directory-only rule leaves a file of that name alone.
     out.push(...(pat === '' ? ['/**'] : r.pattern.endsWith('/') ? [`${pat}/**`] : [pat, `${pat}/**`]));
   }

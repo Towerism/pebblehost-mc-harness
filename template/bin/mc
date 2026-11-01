@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # mc in the private server repo: harness/bin/mc with this repo's .env.
-# MC_HOME defaults to the repo root. pull refuses unless MC_HOME is under
-# .dev/: main's server/ comes only from bin/dev sync, and data only from
-# bin/dev seed. push refuses outside bin/check runbook push (harness guard).
+# MC_HOME defaults to the repo root. pull and fetch refuse unless MC_HOME is
+# under .dev/: main's server/ comes only from bin/dev sync, and data only
+# from bin/dev seed. push refuses outside bin/check runbook push (harness guard).
 set -euo pipefail
 
 root=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export MC_ENV_FILE=${MC_ENV_FILE:-$root/.env}
 export MC_HOME=${MC_HOME:-$root}
 
-if [[ ${1:-} == pull ]]; then
+if [[ ${1:-} == pull || ${1:-} == fetch ]]; then
   home=$(realpath -m "$MC_HOME")
   if [[ $home != "$root/.dev/"* ]]; then
-    echo "mc: pull is refused here: server/ on main comes from bin/dev sync, data from bin/dev seed N --with-data; use bin/mc ls or diff to look" >&2
+    echo "mc: $1 is refused here: server/ on main comes from bin/dev sync, data from bin/dev seed N --with-data; use bin/mc ls or diff to look" >&2
     exit 2
   fi
 fi
