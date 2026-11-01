@@ -3,11 +3,11 @@
 test: lint test-unit test-integration
 
 lint:
-	shellcheck bin/mc bin/path-guard hooks/pre-commit hooks/pre-push test/unit/stub/rclone test/integration/setup_suite.bash
+	shellcheck bin/mc bin/path-guard bin/install-hooks hooks/pre-commit hooks/pre-push hooks/pre-merge-commit test/unit/stub/rclone test/integration/setup_suite.bash
 	npx tsc --noEmit
 
 test-unit:
-	bats --print-output-on-failure --jobs 16 test/unit
+	bats --print-output-on-failure --jobs 24 test/unit
 	node --test 'test/ts/**/*.test.ts'
 
 # One SFTP container for the whole run (test/integration/setup_suite.bash).
@@ -19,6 +19,6 @@ test-integration:
 test-live:
 	MC_LIVE=1 bats --print-output-on-failure test/live
 
-# Path-guard hooks. Relative, so every worktree runs its own hooks/.
+# Path-guard stubs in the shared hooks dir; each checkout runs its own hooks/.
 hooks:
-	git config core.hooksPath hooks
+	bin/install-hooks
