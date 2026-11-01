@@ -4,7 +4,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
 import { applyOverrides } from './overrides.ts';
@@ -50,21 +49,36 @@ export function walk(dir: string, rel = ''): string[] {
   return out;
 }
 
-// The git tree id of dir's files by mode and raw bytes (no filters), built
-// in a throwaway index.
-export function treeOf(root: string, dir: string): string {
+// How the extracted files of `<commit>:<prefix>` differ from that tree, one
+// line per path: missing, extra, mode, or content. A file whose raw bytes
+// differ is hashed again through the repo's clean filters and eol rules
+// (--path), which map archive output (LFS smudge, eol=crlf) back to the
+// stored blob; export-ignore and export-subst still show as differences.
+export function treeDiff(root: string, commit: string, prefix: string, dir: string): string[] {
+  const want = new Map<string, { mode: string; blob: string }>();
+  for (const e of mustGit(root, ['ls-tree', '-r', '-z', '--full-tree', commit, '--', prefix]).split('\0').filter(Boolean)) {
+    const [meta, path] = [e.slice(0, e.indexOf('\t')), e.slice(e.indexOf('\t') + 1)];
+    const [mode, , blob] = meta.split(' ');
+    want.set(path.slice(prefix.length + 1), { mode, blob });
+  }
   const files = walk(dir);
   if (files.some((f) => f.includes('\n'))) fail(`a file name with a newline in ${dir}`);
-  const tmp = mkdtempSync(join(tmpdir(), 'mc-tree-'));
-  try {
-    const env = { GIT_INDEX_FILE: join(tmp, 'index') };
-    const blobs = files.length === 0 ? [] : mustGit(root, ['hash-object', '--no-filters', '--stdin-paths'], { input: `${files.map((f) => join(dir, f)).join('\n')}\n` }).split('\n');
-    const info = files.map((f, i) => `${statSync(join(dir, f)).mode & 0o100 ? '100755' : '100644'} ${blobs[i]}\t${f}`).join('\n');
-    mustGit(root, ['update-index', '--index-info'], { env, input: `${info}\n` });
-    return mustGit(root, ['write-tree', '--missing-ok'], { env });
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
+  const out: string[] = [];
+  const have = new Set(files);
+  for (const rel of want.keys()) if (!have.has(rel)) out.push(`${rel}: missing`);
+  const both = files.filter((f) => {
+    if (want.has(f)) return true;
+    out.push(`${f}: not in the tree`);
+    return false;
+  });
+  const raw = both.length === 0 ? [] : mustGit(root, ['hash-object', '--no-filters', '--stdin-paths'], { input: `${both.map((f) => join(dir, f)).join('\n')}\n` }).split('\n');
+  both.forEach((f, i) => {
+    const w = want.get(f) as { mode: string; blob: string };
+    const mode = statSync(join(dir, f)).mode & 0o100 ? '100755' : '100644';
+    if (mode !== w.mode) out.push(`${f}: mode ${mode}, not ${w.mode}`);
+    if (raw[i] !== w.blob && mustGit(root, ['hash-object', `--path=${prefix}/${f}`, join(dir, f)]) !== w.blob) out.push(`${f}: content differs`);
+  });
+  return out.sort();
 }
 
 // sha256 over every file's path, mode and content.
@@ -120,17 +134,10 @@ export function harnessHash(harnessRoot = HARNESS_ROOT): string {
   return h.digest('hex');
 }
 
+// Over the tracked files only: an ignored scratch file must not change it.
 export function toolHash(harnessRoot = HARNESS_ROOT): string {
   const h = createHash('sha256');
-  for (const dir of CHECK_DIRS) {
-    let files: string[];
-    try {
-      files = walk(join(harnessRoot, dir));
-    } catch {
-      continue;
-    }
-    for (const f of files) h.update(`${dir}/${f}\n${sha256(readFileSync(join(harnessRoot, dir, f)))}\n`);
-  }
+  for (const f of mustGit(harnessRoot, ['ls-files', '-z', '--', ...CHECK_DIRS]).split('\0').filter(Boolean).sort()) h.update(`${f}\n${sha256(readFileSync(join(harnessRoot, f)))}\n`);
   return h.digest('hex');
 }
 
@@ -180,10 +187,9 @@ export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROO
     rmSync(join(ctx, 'server.tar'));
     base = join(ctx, 'server');
     // git archive applies export-ignore and export-subst from .gitattributes
-    // and .git/info/attributes: the extracted bytes must still be the tree.
-    const want = mustGit(src.root, ['rev-parse', `${src.commit}:server`]);
-    const got = treeOf(src.root, base);
-    if (got !== want) fail(`git archive of server/ at ${src.commit.slice(0, 12)} is not its tree (${got.slice(0, 12)}, not ${want.slice(0, 12)}): check export-ignore or export-subst in .gitattributes or .git/info/attributes`);
+    // and .git/info/attributes: the extracted files must still be the tree.
+    const diff = treeDiff(src.root, src.commit, 'server', base);
+    if (diff.length > 0) fail(`git archive of server/ at ${src.commit.slice(0, 12)} is not its tree (export-ignore or export-subst in .gitattributes or .git/info/attributes?):\n${diff.slice(0, 20).join('\n')}${diff.length > 20 ? `\n... ${diff.length - 20} more` : ''}`);
   } else {
     base = join(src.root, 'server');
   }

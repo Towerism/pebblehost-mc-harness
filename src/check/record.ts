@@ -33,6 +33,9 @@ export type RunRecord = {
   containerId: string;
   // How many bin/check runs the volume had before this one (0: the first).
   runIndex: number;
+  // Another run was logged on the volume while this one ran (or its log line
+  // vanished): its result can't be attributed to the server alone.
+  concurrent: boolean;
   // The hash of the harness's check and gate code (toolHash).
   toolHash: string;
   // A re-run of the green by bin/check gate.

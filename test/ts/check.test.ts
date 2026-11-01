@@ -50,7 +50,8 @@ test('difficulty', async () => {
   assert.deepEqual([red.pass, green.pass], [false, true]);
   // Each run is logged in the volume: the green was not the first run on it.
   assert.deepEqual([red.runIndex, green.runIndex], [0, 1]);
-  assert.match(readFileSync(join(root, 'fakefs/.mc-harness-runs'), 'utf8'), /^\S+ issue-3 3-motd\n\S+ issue-3 3-motd\n$/);
+  assert.match(readFileSync(join(root, 'fakefs/.mc-harness-runs'), 'utf8'), /^\S+ issue-3 3-motd [0-9a-f-]{36}\n\S+ issue-3 3-motd [0-9a-f-]{36}\n$/);
+  assert.deepEqual([red.concurrent, green.concurrent], [false, false]);
   assert.match(red.toolHash, /^[0-9a-f]{64}$/);
   assert.match(red.output, /The difficulty is Easy/);
   assert.ok(!Number.isNaN(Date.parse(green.time)));
