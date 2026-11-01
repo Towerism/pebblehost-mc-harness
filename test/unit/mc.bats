@@ -36,6 +36,34 @@ ENV
   [ "$(cat "$STUB_OBSCURED")" = 'pa$$ "word"' ]
 }
 
+@test "unquoted values end at a space-led comment; quoted values keep #" {
+  cat >"$MC_HOME/.env" <<'ENV'
+PEBBLE_SFTP_HOST=node.example.net   # from the panel
+PEBBLE_SFTP_USER=me.abcd1234 # user
+PEBBLE_PANEL_PASSWORD="se#cret # x" # quoted
+ENV
+  run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=node.example.net' "$STUB_ENV"
+  grep -qx 'RCLONE_CONFIG_PEBBLE_USER=me.abcd1234' "$STUB_ENV"
+  [ "$(cat "$STUB_OBSCURED")" = 'se#cret # x' ]
+}
+
+@test "host given as sftp://host:port supplies the port" {
+  sed -i 's#^PEBBLE_SFTP_HOST=.*#PEBBLE_SFTP_HOST=sftp://node.example.net:2222#' "$MC_HOME/.env"
+  run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=node.example.net' "$STUB_ENV"
+  grep -qx 'RCLONE_CONFIG_PEBBLE_PORT=2222' "$STUB_ENV"
+}
+
+@test "PEBBLE_SFTP_PORT wins over a port in the host" {
+  printf 'PEBBLE_SFTP_HOST=node.example.net:2222\nPEBBLE_SFTP_PORT=2022\n' >>"$MC_HOME/.env"
+  run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_PORT=2022' "$STUB_ENV"
+}
+
 @test "CRLF line endings in .env are tolerated" {
   sed -i 's/$/\r/' "$MC_HOME/.env"
   run "$mc" ls

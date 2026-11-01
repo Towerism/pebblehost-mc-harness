@@ -41,7 +41,13 @@ load_env() {
     [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
     [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
     key=${BASH_REMATCH[2]} val=${BASH_REMATCH[3]}
-    if [[ $val =~ ^\"(.*)\"$ || $val =~ ^\'(.*)\'$ ]]; then val=${BASH_REMATCH[1]}; fi
+    if [[ $val =~ ^\"(.*)\"[[:space:]]*(#.*)?$ || $val =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
+      val=${BASH_REMATCH[1]}
+    else
+      # Unquoted values end at a space-led comment, as in common .env dialects.
+      val=${val%%[[:space:]]#*}
+      val=${val%"${val##*[![:space:]]}"}
+    fi
     case $key in PEBBLE_*) printf -v "$key" '%s' "$val" ;; esac
   done <"$env_file"
   local missing=() v
@@ -55,8 +61,14 @@ load_env() {
 configure_rclone() {
   command -v rclone >/dev/null || die "rclone not installed"
   export RCLONE_CONFIG_PEBBLE_TYPE=sftp
-  export RCLONE_CONFIG_PEBBLE_HOST=$PEBBLE_SFTP_HOST
-  export RCLONE_CONFIG_PEBBLE_PORT=${PEBBLE_SFTP_PORT:-2022}
+  # Accept the host as the panel shows it: sftp://host:port.
+  local host=${PEBBLE_SFTP_HOST#sftp://} port=${PEBBLE_SFTP_PORT:-}
+  if [[ $host == *:* ]]; then
+    port=${port:-${host##*:}}
+    host=${host%%:*}
+  fi
+  export RCLONE_CONFIG_PEBBLE_HOST=$host
+  export RCLONE_CONFIG_PEBBLE_PORT=${port:-2022}
   export RCLONE_CONFIG_PEBBLE_USER=$PEBBLE_SFTP_USER
   # Pterodactyl-style SFTP has no shell; skip rclone's shell probing and hashing.
   export RCLONE_CONFIG_PEBBLE_SHELL_TYPE=none
