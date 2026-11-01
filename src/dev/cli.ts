@@ -3,7 +3,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { inventory, issueBranch, seedData, syncLive } from '../sync/sync.ts';
+import { inventory, issueBranch, refuseSkipped, seedData, syncLive } from '../sync/sync.ts';
 import { DevError, docker as d, fail, must } from './docker.ts';
 import { build, buildRelay, chooseJar, dirtyHarness, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
 import { bootTimeout, createJoin, createPod, formatBootReport, killOrphanSuite, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
@@ -208,6 +208,7 @@ function main(argv: string[]) {
     case 'seed': {
       if (o.issue === undefined) fail(`seed needs an issue number\n${USAGE}`);
       const n = o.issue;
+      refuseSkipped(root, o.withData);
       const branch = issueBranch(root, n, () => syncLive(root));
       say(`seed: ${branch} issue/${n}`);
       const fixtures = seedData(root, n, { withData: o.withData, withWorlds: o.withWorlds });

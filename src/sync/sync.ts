@@ -6,7 +6,7 @@
 // boots a fresh pod with opt-in data pulled as fixtures. inventory proposes
 // data rules from files live rewrites between two listings.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fail } from '../dev/docker.ts';
 import { git, HARNESS_ROOT, privateDir } from '../dev/image.ts';
@@ -136,6 +136,15 @@ export function syncLive(root: string): SyncResult {
 
 export type SeedOpts = { withData: string[]; withWorlds: boolean };
 
+// --with-data paths a skip rule covers: refused before anything else runs.
+export function refuseSkipped(root: string, paths: string[]): void {
+  const rules = readRules(syncDir(root));
+  for (const p of paths) {
+    const skip = matchRule(rules, p, ['skip']) ?? matchRule(rules, p, ['skip'], true);
+    if (skip) fail(`--with-data ${p}: sync-rules skip ${skip.pattern} covers it; skip paths are never transferred`);
+  }
+}
+
 // The seed's data fixtures: .dev/seed-N/home/server after the opt-in pulls,
 // or none.
 export function seedData(root: string, n: number, o: SeedOpts): string[] {
@@ -153,6 +162,7 @@ export function seedData(root: string, n: number, o: SeedOpts): string[] {
     paths.push(...worlds);
     for (const w of worlds) dirs.add(w);
   }
+  refuseSkipped(root, o.withData);
   for (const p of o.withData) {
     // A path is a directory when listing it shows more than the path itself.
     const parent = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
@@ -167,7 +177,14 @@ export function seedData(root: string, n: number, o: SeedOpts): string[] {
     pull(home, root, p, rules, ['skip'], dirs.has(p));
     say(`seed: pulled ${p} as data`);
   }
-  return paths.length > 0 ? [join(home, 'server')] : [];
+  // Fixtures only when something arrived: an empty directory, or one whose
+  // files skip rules all left out, boots with none.
+  const data = join(home, 'server');
+  if (paths.length > 0 && !(existsSync(data) && readdirSync(data, { recursive: true, withFileTypes: true }).some((e) => e.isFile()))) {
+    say('seed: the data paths held no files to pull; booting with no data fixtures');
+    return [];
+  }
+  return paths.length > 0 ? [data] : [];
 }
 
 // Put the project on issue/N: reuse it (keeping its commits) or cut it from
@@ -205,11 +222,11 @@ export function inventory(root: string, waitS: number, dirs = ['plugins']): stri
   };
   const first = list();
   say(`inventory: listed ${first.size} file(s); listing again in ${waitS}s`);
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitS * 1000);
+  spawnSync('sleep', [String(waitS)], { stdio: 'ignore' });
   const second = list();
   const changed = [...new Set([...first.keys(), ...second.keys()])].filter((p) => first.get(p) !== second.get(p)).sort();
   const named = [...new Set([...second.keys()].flatMap((p) => p.split('/').slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/'))))].filter((d) => /(^|\/)[^/]*data$/i.test(d)).map((d) => `${d}/`);
-  const proposals = [...changed, ...named].filter((p) => !matchRule(rules, p.replace(/\/$/, ''), ['skip', 'data', 'review']));
+  const proposals = [...changed, ...named].filter((p) => !matchRule(rules, p.replace(/\/$/, ''), ['skip', 'data', 'review'], p.endsWith('/')));
   if (proposals.length === 0) {
     say('inventory: nothing new to review');
     return [];

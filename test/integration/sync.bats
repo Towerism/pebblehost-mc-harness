@@ -7,6 +7,7 @@ setup() {
   export RCLONE_RETRIES=1 RCLONE_LOW_LEVEL_RETRIES=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
   export MC_HOME=$BATS_TEST_TMPDIR/proj
   dev=$BATS_TEST_DIRNAME/../../bin/dev
+  mc=$BATS_TEST_DIRNAME/../../bin/mc
   git init -q -b main "$MC_HOME"
   git -C "$MC_HOME" config user.name test
   git -C "$MC_HOME" config user.email test@example.com
@@ -30,7 +31,7 @@ ENV
 # The live server root, as the SFTP user; reset to an empty tree first.
 live() { docker exec -u "$SFTP_UID" -w /home/mc "$SFTP_CONTAINER" sh -c "$1"; }
 live_reset() {
-  docker exec "$SFTP_CONTAINER" sh -c 'cd /home/mc && rm -rf plugins config server.properties purpur.jar && mkdir plugins && chown '"$SFTP_UID"' plugins && chmod 755 /home/mc'
+  docker exec "$SFTP_CONTAINER" sh -c 'cd /home/mc && rm -rf plugins config server.properties purpur.jar world world_nether && mkdir plugins && chown '"$SFTP_UID"' plugins && chmod 755 /home/mc'
   docker exec "$SFTP_CONTAINER" sh -c 'touch /home/mc/server.properties /home/mc/purpur.jar && chown '"$SFTP_UID"' /home/mc/server.properties /home/mc/purpur.jar'
 }
 
@@ -144,4 +145,62 @@ main_log() { git -C "$MC_HOME" log --format=%s main; }
   # Review entries change nothing until promoted: config.yml is not proposed.
   run git -C "$MC_HOME" show main:sync-rules
   [[ $output != *config.yml* ]]
+}
+
+# The exclude file bin/dev sync writes for a pull of $1 (skip rules only).
+excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m.rcloneExcludes(m.readRules("/nonexistent"), ["skip"], process.argv[2])))' "$BATS_TEST_DIRNAME/../../src/sync/rules.ts" "$1"; }
+
+@test "skip trees on live stay out of sync and of bin/mc pull with MC_EXCLUDE_FILE; a skipped file's change doesn't make push refuse" {
+  live 'mkdir -p plugins/ajLeaderboards/past-resets plugins/Eco/logs && printf "{}" >plugins/ajLeaderboards/past-resets/1.json && printf "l: 1\n" >plugins/ajLeaderboards/config.yml && printf "log\n" >plugins/Eco/logs/today.log'
+  "$dev" sync </dev/null
+  run git -C "$MC_HOME" ls-tree -r --name-only main
+  [[ $output == *server/plugins/ajLeaderboards/config.yml* && $output != *past-resets* && $output != *today.log* ]]
+  [ ! -e "$MC_HOME/.dev/sync/server/plugins/ajLeaderboards/past-resets" ]
+  home=$BATS_TEST_TMPDIR/home
+  mkdir -p "$home"
+  excludes plugins >"$BATS_TEST_TMPDIR/ex"
+  grep -qx '/ajLeaderboards/past-resets/\*\*' "$BATS_TEST_TMPDIR/ex"
+  export MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/ex MC_ENV_FILE=$MC_HOME/.env
+  MC_HOME=$home "$mc" pull plugins
+  [ -f "$home/server/plugins/ajLeaderboards/config.yml" ]
+  [ ! -e "$home/server/plugins/ajLeaderboards/past-resets" ]
+  [ ! -e "$home/server/plugins/Eco/logs" ]
+  # Live rewrites a skipped file: the push-drift snapshot doesn't see it.
+  live 'printf "{\"a\":1}" >plugins/ajLeaderboards/past-resets/1.json && printf "{}" >plugins/ajLeaderboards/past-resets/2.json'
+  echo 'l: 2' >"$home/server/plugins/ajLeaderboards/config.yml"
+  run env MC_HOME="$home" "$mc" push plugins
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(live 'cat plugins/ajLeaderboards/config.yml')" = 'l: 2' ]
+  [ "$(live 'ls plugins/ajLeaderboards/past-resets | wc -l')" -eq 2 ]
+  # A change to a tracked file still makes it refuse.
+  live 'printf "rate: 9\n" >plugins/Eco/config.yml'
+  run env MC_HOME="$home" "$mc" push plugins
+  [ "$status" -eq 2 ]
+  [[ $output == *"remote 'plugins' changed since the last pull"* ]]
+}
+
+@test "seed pulls world*/ only with --with-worlds; data that holds no files boots with no fixtures" {
+  docker exec "$SFTP_CONTAINER" sh -c "mkdir -p /home/mc/world/region /home/mc/world_nether && echo lvl >/home/mc/world/level.dat && echo n >/home/mc/world_nether/level.dat && chown -R $SFTP_UID /home/mc/world /home/mc/world_nether"
+  live 'mkdir -p plugins/Empty/past && mkdir -p plugins/Logs/logs && printf "x\n" >plugins/Logs/logs/a.log'
+  run "$dev" seed 6 --no-boot </dev/null
+  [ "$status" -eq 0 ]
+  [ ! -e "$MC_HOME/.dev/seed-6/home/server" ]
+  git -C "$MC_HOME" switch -q work
+  run "$dev" seed 6 --with-worlds --no-boot </dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$MC_HOME/.dev/seed-6/home/server/world/level.dat")" = lvl ]
+  [ -f "$MC_HOME/.dev/seed-6/home/server/world_nether/level.dat" ]
+  [ ! -e "$MC_HOME/.dev/seed-6/home/server/plugins" ]
+  [[ $output == *"seed: issue/6 ready with data in .dev/seed-6"* ]]
+  # A directory with no files, and one whose files are all skipped.
+  run "$dev" seed 6 --with-data plugins/Empty plugins/Logs --no-boot </dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"seed: the data paths held no files to pull; booting with no data fixtures"* ]]
+  [[ $output == *"seed: issue/6 ready; no pod booted"* ]]
+  run "$dev" seed 6 --with-data plugins/ajLeaderboards/past-resets --no-boot </dev/null
+  [ "$status" -eq 2 ]
+  [[ $output == *"sync-rules skip plugins/ajLeaderboards/past-resets/ covers it"* ]]
 }
