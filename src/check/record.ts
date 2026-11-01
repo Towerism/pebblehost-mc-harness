@@ -13,7 +13,8 @@ export type RunRecord = {
   check: string;
   issue: number;
   kind: Kind;
-  target: 'dev';
+  // dev: a pod; live: read-only over SFTP (the gate counts dev runs only).
+  target: 'dev' | 'live';
   pass: boolean;
   time: string;
   // What booted (e2e: container labels) or HEAD (bare-text; no image).

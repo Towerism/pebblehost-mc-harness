@@ -1,9 +1,10 @@
 // Harness API for headless players, imported as '#harness/bot'. Bots live in
 // the pod's relay (mineflayer, offline mode) and are reached like the console;
 // a check's bot calls don't mark the volume explored. The suite makes every
-// bot leave between two checks.
+// bot leave between two checks. The live target has no bots (live.ts).
 import { docker as d } from '../dev/docker.ts';
 import { podOf, relayRequest } from '../dev/pod.ts';
+import { onLive, refuseOnLive } from './live.ts';
 
 function pod() {
   if (process.env.MC_TARGET !== undefined && process.env.MC_TARGET !== 'dev') throw new Error(`target ${process.env.MC_TARGET} is not supported`);
@@ -11,7 +12,7 @@ function pod() {
   return podOf(process.env.MC_HOME, process.env.MC_POD || 'dev');
 }
 
-const call = (req: { op: string } & Record<string, unknown>) => relayRequest(pod(), d, req);
+const call = (req: { op: string } & Record<string, unknown>) => (onLive() ? refuseOnLive(`bot ${req.op.slice(4)}`, 'bot') : relayRequest(pod(), d, req));
 
 export type Bot = {
   name: string;

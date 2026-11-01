@@ -12,16 +12,20 @@ import { writeDoc } from '../gate/docs.ts';
 import { confirmCheck, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
 import { issueOf, readRecords, runsFile, type Kind, type RunRecord } from './record.ts';
 import { readProfile } from './profile.ts';
-import { runCheck } from './run.ts';
+import { runCheck, sweepLiveRuns, type Target } from './run.ts';
 import { runSuite, teardownSuitePods } from './suite.ts';
 import { formatTimings } from './timings.ts';
 
 const USAGE = `usage: check <command> <id> [options]
 
-  run <id> [--fresh] [--pod ID] [--timeout S]
+  run <id> [--fresh] [--pod ID] [--timeout S] [--target dev|live]
                           run checks/<id>/*.test.ts (node --test) against the
                           pod (e2e) or the committed server/ (bare-text), and
-                          append a record to .verify/runs/issue-N.jsonl
+                          append a record to .verify/runs/issue-N.jsonl;
+                          --target live reads the live server over SFTP
+                          (bin/mc pull), refuses the console and bots (a test
+                          needing them is skipped if profile.json declares
+                          it in needs, else fails) and exits 2 if no test ran
   gate <id> [--no-confirm] [--pod ID]
                           check the red→green pair (rules G1-G10), then re-run
                           the green on the pod booted from its image; commit
@@ -29,7 +33,7 @@ const USAGE = `usage: check <command> <id> [options]
   postmortem <id>         write docs/postmortems/<date>-<N>-<slug>.md
   runbook <id>            write docs/runbooks/<date>-<N>-<slug>.md
                           (both only after a confirmed gate pass)
-  suite [--jar NAME] [--heap SIZE] [--timeout S]
+  suite [--jar NAME] [--heap SIZE] [--timeout S] [--target dev|live]
                           every committed check: bare-text first, then one pod
                           per fixture profile, torn down after; prints and
                           writes .dev/runs/<ts>/timings.json; records nothing
@@ -41,10 +45,10 @@ checks/<id>/profile.json gives the kind: {"kind": "e2e"} or {"kind":
 or --issue N. The project is $MC_HOME (default: the harness root).
 Exit codes: 0 passed, 1 failed (recorded), 2 refused.`;
 
-type Opts = { id?: string; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number; jar?: string; heap?: string };
+type Opts = { id?: string; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number; jar?: string; heap?: string; target: Target };
 
 function parse(argv: string[]): { cmd: string; o: Opts } {
-  const o: Opts = { pod: 'dev', fresh: false, confirm: true, timeout: 600 };
+  const o: Opts = { pod: 'dev', fresh: false, confirm: true, timeout: 600, target: 'dev' };
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '-h' || cmd === '--help') fail(USAGE);
   for (let i = 0; i < rest.length; i++) {
@@ -55,7 +59,11 @@ function parse(argv: string[]): { cmd: string; o: Opts } {
     else if (a === '--timeout') o.timeout = Number(val());
     else if (a === '--fresh') o.fresh = true;
     else if (a === '--no-confirm') o.confirm = false;
-    else if (a === '--jar') o.jar = val();
+    else if (a === '--target') {
+      const t = val();
+      if (t !== 'dev' && t !== 'live') fail(`--target is dev or live, not ${t}`);
+      o.target = t;
+    } else if (a === '--jar') o.jar = val();
     else if (a === '--heap') o.heap = val();
     else if (!a.startsWith('-') && o.id === undefined) o.id = a;
     else fail(`unexpected argument ${a}\n${USAGE}`);
@@ -92,6 +100,32 @@ function verdict(root: string, id: string, issue: number, records: RunRecord[]):
   return { ...evaluate(records, { id, issue, kind, ...bare }, gitRepo(root)), kind };
 }
 
+// bin/check run and gate run node --test synchronously in a child, so the
+// parent can react to SIGINT/SIGTERM: kill the child's process group (the
+// check's node --test with it), remove the run's live home, exit 130/143.
+function runParent(root: string, argv: string[]): void {
+  const child = spawn(process.execPath, [import.meta.filename, ...argv], { stdio: 'inherit', detached: true, env: { ...process.env, MC_HOME: root, MC_RUN_CHILD: '1' } });
+  let signal: NodeJS.Signals | null = null;
+  const stop = (sig: NodeJS.Signals) => {
+    if (signal) return;
+    signal = sig;
+    process.stderr.write(`check: ${sig}: stopping the run\n`);
+    try {
+      process.kill(-(child.pid as number), 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  child.on('exit', (code) => {
+    if (signal === null) process.exit(code ?? 2);
+    const n = sweepLiveRuns(root);
+    say(`run: ${signal}: stopped; nothing recorded${n ? `; removed ${n} live run home(s)` : ''}`);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  });
+}
+
 function suiteParent(root: string, argv: string[]): void {
   // A suite whose parent was SIGKILLed can leave its child and pods behind.
   if (killOrphanSuite(root)) say('suite: stopped an orphaned suite run');
@@ -116,6 +150,7 @@ function suiteParent(root: string, argv: string[]): void {
   child.on('exit', (code) => {
     rmSync(suitePidFile(root), { force: true });
     if (signal === null) process.exit(code ?? 2);
+    sweepLiveRuns(root);
     // A docker call the kill cut short can still finish creating its
     // resource a moment later: sweep again until a pass finds nothing.
     let removed = 0;
@@ -149,19 +184,25 @@ function main(argv: string[]) {
       suiteParent(root, argv);
       return;
     }
-    const { timings, file, checks, failed } = runSuite({ root, timeoutS: o.timeout, jar: o.jar, heap: o.heap }, d);
+    const { timings, file, checks, failed, executed } = runSuite({ root, timeoutS: o.timeout, jar: o.jar, heap: o.heap, target: o.target }, d);
     say(formatTimings(timings));
-    say(`suite: ${checks} check(s), ${failed.length} failed or refused${failed.length ? ` (${failed.join(', ')})` : ''}; ${timings.profiles.length} pod(s); timings in ${file}`);
+    say(`suite${o.target === 'live' ? ' (live, read-only)' : ''}: ${checks} check(s), ${failed.length} failed or refused${failed.length ? ` (${failed.join(', ')})` : ''}; ${timings.profiles.length} pod(s); timings in ${file}`);
+    if (executed === 0) fail(`suite: no check ran a test${o.target === 'live' ? ' on live: every test needs the console or a bot' : ''}`);
     process.exitCode = failed.length > 0 ? 1 : 0;
     return;
   }
   if (o.id === undefined) fail(`${cmd} needs a check id\n${USAGE}`);
+  if ((cmd === 'run' || cmd === 'gate') && process.env.MC_RUN_CHILD !== '1') {
+    runParent(root, argv);
+    return;
+  }
+  if (o.target === 'live' && cmd !== 'run') fail(`${cmd} works on dev records only; --target live is for run and suite`);
   const issue = issueOf(root, o.issue);
   switch (cmd) {
     case 'run': {
-      const { record, output } = runCheck({ root, id: o.id, issue, pod: o.pod, fresh: o.fresh, confirm: false, timeoutS: o.timeout }, d);
+      const { record, output } = runCheck({ root, id: o.id, issue, pod: o.pod, fresh: o.fresh, confirm: false, timeoutS: o.timeout, target: o.target }, d);
       process.stdout.write(output.endsWith('\n') || output === '' ? output : `${output}\n`);
-      const counts = record.kind === 'e2e' ? `commit ${short(record.commit)}, generation ${record.generation.slice(0, 8)}${record.fresh ? ' (fresh)' : ''}${record.explored ? ' (explored: does not count as a red)' : ''}` : `commit ${short(record.commit)}`;
+      const counts = record.target === 'live' ? 'live, read-only' : record.kind === 'e2e' ? `commit ${short(record.commit)}, generation ${record.generation.slice(0, 8)}${record.fresh ? ' (fresh)' : ''}${record.explored ? ' (explored: does not count as a red)' : ''}` : `commit ${short(record.commit)}`;
       say(`run: ${o.id} ${record.pass ? 'passed' : 'failed'} (${record.kind}, ${counts}); recorded in ${runsFile(root, issue)}`);
       process.exitCode = record.pass ? 0 : 1;
       break;
@@ -204,7 +245,8 @@ function main(argv: string[]) {
       const { confirm, why } = confirmCheck(records, v.green);
       if (!confirm) fail(`${cmd}: the green of ${o.id} is not confirmed (${why}); run bin/dev rebuild, then bin/check gate ${o.id}`);
       if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${o.id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
-      say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm)}`);
+      const live = records.filter((r) => r.check === o.id && r.target === 'live').at(-1);
+      say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm, live)}`);
       break;
     }
   }

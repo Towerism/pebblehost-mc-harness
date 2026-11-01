@@ -1,15 +1,16 @@
 // bin/check run: run checks/<id>/*.test.ts with node --test against the pod
 // (e2e) or the committed tree (bare-text), then append a run record.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { boot } from '../dev/cli.ts';
 import { fail, type Docker } from '../dev/docker.ts';
-import { dirtyHarness, dirtyServer, git, labels, source, toolHash } from '../dev/image.ts';
+import { dirtyHarness, dirtyServer, git, labels, privateDir, source, toolHash } from '../dev/image.ts';
 import { isExplored, logRun, names, podOf, readPodFile, relayRequest, runPosition, state, type Pod } from '../dev/pod.ts';
 import { fixtureDirs, readProfile, type Profile } from './profile.ts';
+import { LIVE_CHANGED, LIVE_SKIP } from './live.ts';
 import { appendRecord, type RunRecord } from './record.ts';
 
 // The git tree id of the committed checks/<id>/; refuses uncommitted changes
@@ -25,7 +26,8 @@ export function checkHash(root: string, id: string): string {
   return r.stdout.trim();
 }
 
-export type RunOpts = { root: string; id: string; issue: number; pod: string; fresh: boolean; confirm: boolean; timeoutS: number };
+export type Target = 'dev' | 'live';
+export type RunOpts = { root: string; id: string; issue: number; pod: string; fresh: boolean; confirm: boolean; timeoutS: number; target?: Target };
 
 export type Run = { record: RunRecord; output: string };
 
@@ -60,14 +62,70 @@ export function committedTests(root: string, id: string, hash: string, profile: 
 // The env a check runs with: MC_* and the allow-listed variables only.
 // MC_RESTART_OK lets dev.restart() and dev.reset() run (profile restart or
 // exclusive).
-export function checkEnv(root: string, id: string, pod: string, commit: string, profile: Profile): Record<string, string> {
-  const env: Record<string, string> = { MC_HOME: root, MC_POD: pod, MC_TARGET: 'dev', MC_COMMIT: commit, MC_CHECK_DIR: realpathSync(join(root, 'checks', id)) };
+export function checkEnv(root: string, id: string, pod: string, commit: string, profile: Profile, live?: LiveRun): Record<string, string> {
+  const env: Record<string, string> = { MC_HOME: root, MC_POD: pod, MC_TARGET: live ? 'live' : 'dev', MC_COMMIT: commit, MC_CHECK_DIR: realpathSync(join(root, 'checks', id)), MC_NEEDS: profile.needs.join(',') };
+  if (live) Object.assign(env, { MC_LIVE_HOME: live.home, MC_ENV_FILE: live.envFile });
   if (profile.restart || profile.exclusive) env.MC_RESTART_OK = '1';
   for (const k of KEEP_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
   return env;
 }
 
-export type TestRun = { pass: boolean; output: string; seconds: number };
+// A live run's own MC_HOME for bin/mc pulls (under .dev/live/, removed after)
+// and the .env that bin/mc reads: MC_ENV_FILE, else the project's.
+export type LiveRun = { home: string; envFile: string };
+
+export function startLive(root: string): LiveRun {
+  sweepLiveRuns(root);
+  const dir = privateDir(join(privateDir(join(root, '.dev')), 'live'));
+  const home = mkdtempSync(join(dir, 'run-'));
+  writeFileSync(join(home, '.owner'), `${process.pid}\n`);
+  return { home, envFile: process.env.MC_ENV_FILE || join(root, '.env') };
+}
+
+// Remove the live run homes whose owner process is gone: a run killed by a
+// signal (even SIGKILL) leaves its pulled live files behind. A home created
+// this past minute may not have its owner file yet and is left alone.
+export function sweepLiveRuns(root: string): number {
+  const dir = join(root, '.dev', 'live');
+  if (!existsSync(dir)) return 0;
+  let removed = 0;
+  for (const name of readdirSync(dir).filter((n) => n.startsWith('run-'))) {
+    const home = join(dir, name);
+    const owner = existsSync(join(home, '.owner')) ? Number(readFileSync(join(home, '.owner'), 'utf8')) : 0;
+    if (owner > 0 && alive(owner)) continue;
+    if (owner === 0 && Date.now() - statSync(home).mtimeMs < 60_000) continue;
+    rmSync(home, { recursive: true, force: true });
+    removed++;
+  }
+  return removed;
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+// executed: tests that ran to a result; skipped: tests the live target
+// skipped because the check declares the console or bot they needed.
+export type TestRun = { pass: boolean; output: string; seconds: number; executed: number; skipped: number };
+
+// Top-level TAP results, each with the text of its diagnostic block.
+function tapResults(tap: string): { failed: boolean; skipped: boolean; name: string }[] {
+  const lines = tap.split('\n');
+  const out: { failed: boolean; skipped: boolean; name: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(not )?ok \d+ - (.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const block: string[] = [];
+    for (let j = i + 1; j < lines.length && !/^((not )?ok \d+ |# Subtest:|1\.\.\d|# (tests|suites|pass|fail) )/.test(lines[j]); j++) block.push(lines[j]);
+    out.push({ name: m[2], failed: !!m[1], skipped: !!m[1] && block.join('\n').includes(LIVE_SKIP) });
+  }
+  return out;
+}
 
 // node --test over the files with the #harness loader. Refuses (nothing to
 // record) a refused import and a file that defines no test.
@@ -82,12 +140,17 @@ export function runTests(root: string, id: string, files: string[], env: Record<
     if (r.error) fail(`node --test did not finish: ${r.error.message}\n${output}`);
     const refused = output.split('\n').find((l) => l.includes('import refused:'));
     if (refused) fail(`checks/${id} imports from outside its directory; nothing recorded\n${refused.trim()}`);
+    const changed = output.split('\n').find((l) => l.includes(LIVE_CHANGED));
+    if (changed) fail(`checks/${id}: ${changed.trim().replace(/^.*?(live database changed)/, '$1')}; nothing recorded`);
     // node --test reports a file that defines no test as one passing test
     // named after the file: that run proves nothing.
-    const top = [...(existsSync(tap) ? readFileSync(tap, 'utf8') : '').matchAll(/^(not )?ok \d+ - (.*)$/gm)];
-    const empty = files.filter((f) => top.some((m) => !m[1] && m[2] === f));
+    const top = tapResults(existsSync(tap) ? readFileSync(tap, 'utf8') : '');
+    const empty = files.filter((f) => top.some((t) => !t.failed && t.name === f));
     if (top.length === 0 || empty.length > 0) fail(`${empty.join(', ') || `checks/${id}`} defines no test; nothing recorded\n${output}`);
-    return { pass: r.status === 0 && top.every((m) => !m[1]), output, seconds: (Date.now() - t0) / 1000 };
+    const skipped = top.filter((t) => t.skipped).length;
+    // A skipped test fails in node's eyes; it fails the check only if it was not a skip.
+    const pass = top.every((t) => !t.failed || t.skipped) && (r.status === 0 || top.some((t) => t.failed));
+    return { pass, output, seconds: (Date.now() - t0) / 1000, executed: top.length - skipped, skipped };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -101,11 +164,17 @@ export function runCheck(o: RunOpts, d: Docker): Run {
   const hash = checkHash(o.root, o.id);
   const files = committedTests(o.root, o.id, hash, profile);
   const p = podOf(o.root, o.pod);
+  const live = o.target === 'live';
   let id: Pick<RunRecord, 'source' | 'commit' | 'treeHash' | 'harnessHash' | 'imageHash' | 'fixturesHash' | 'generation' | 'fresh' | 'explored' | 'containerId' | 'runIndex' | 'concurrent'>;
   const time = new Date().toISOString();
   // e2e: the run's line in the volume's run log; its position is read after the run.
   let logged: { pod: Pod; nonce: string } | null = null;
-  if (kind === 'e2e') {
+  if (live) {
+    // Read-only over SFTP: no pod, no run log, no explored marker, no bots.
+    if (o.fresh) fail('--fresh boots a dev pod; the live target has none');
+    const src = source(o.root);
+    id = { source: 'live', commit: src.kind === 'git' ? src.commit : '', treeHash: '', harnessHash: '', imageHash: '', fixturesHash: '', generation: '', fresh: false, explored: false, containerId: '', runIndex: 0, concurrent: false };
+  } else if (kind === 'e2e') {
     // A fresh volume carries the check's own fixtures.
     if (o.fresh) boot(p, { ...readPodFile(p), fixtures: fixtureDirs(o.root, o.id, profile) }, undefined, true, true);
     const server = names(p).server;
@@ -127,21 +196,26 @@ export function runCheck(o: RunOpts, d: Docker): Run {
   // Bots a previous run left joined would skew this one (a name already
   // taken, an extra player): every bot leaves before and after the tests.
   // The relay call is not a check run: no run-log line, no explored mark.
-  if (kind === 'e2e') relayRequest(p, d, { op: 'bot.quitAll' });
-  let run: { pass: boolean; output: string };
+  const pod = kind === 'e2e' && !live;
+  if (pod) relayRequest(p, d, { op: 'bot.quitAll' });
+  const liveRun = live ? startLive(o.root) : undefined;
+  let run: TestRun;
   try {
-    run = runTests(o.root, o.id, files, checkEnv(o.root, o.id, o.pod, id.commit, profile), o.timeoutS);
+    run = runTests(o.root, o.id, files, checkEnv(o.root, o.id, o.pod, id.commit, profile, liveRun), o.timeoutS);
   } finally {
-    if (kind === 'e2e') relayRequest(p, d, { op: 'bot.quitAll' });
+    if (pod) relayRequest(p, d, { op: 'bot.quitAll' });
+    // The pulled live files can hold player data: never kept.
+    if (liveRun) rmSync(liveRun.home, { recursive: true, force: true });
   }
   const { pass, output } = run;
+  if (live && run.executed === 0) fail(`checks/${o.id} ran no test on live (${run.skipped} skipped: they need the console or a bot); nothing recorded\n${output}`);
   if (logged) {
     const pos = runPosition(logged.pod, d, logged.nonce);
     id.runIndex = pos.index;
     id.concurrent = pos.index < 0 || pos.after > 0;
     id.explored ||= isExplored(logged.pod, d);
   }
-  const record: RunRecord = { check: o.id, issue: o.issue, kind, target: 'dev', pass, time, ...id, checkHash: hash, toolHash: tool, confirm: o.confirm, output: output.trimEnd().split('\n').slice(-TAIL).join('\n') };
+  const record: RunRecord = { check: o.id, issue: o.issue, kind, target: live ? 'live' : 'dev', pass, time, ...id, checkHash: hash, toolHash: tool, confirm: o.confirm, output: output.trimEnd().split('\n').slice(-TAIL).join('\n') };
   appendRecord(o.root, record);
   return { record, output };
 }

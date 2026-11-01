@@ -79,7 +79,9 @@ export function pairProblems(red: RunRecord, green: RunRecord, c: GateCheck, rep
 // The newest green with an earlier red that passes every rule. Otherwise
 // the reasons for the newest green and its newest earlier red.
 export function evaluate(records: RunRecord[], c: GateCheck, repo: GateRepo): Verdict {
-  const runs = records.filter((r) => r.check === c.id && !r.confirm);
+  // Live runs (bin/check run --target live) are read-only checks after the
+  // runbook; they never stand in for a red or a green.
+  const runs = records.filter((r) => r.check === c.id && !r.confirm && r.target === 'dev');
   const greens = runs.map((r, i) => [r, i] as const).filter(([r]) => r.pass).reverse();
   if (greens.length === 0) return { ok: false, reasons: [`G1: no passing run of ${c.id}`] };
   let first: string[] | null = null;

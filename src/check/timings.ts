@@ -4,9 +4,10 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fail } from '../dev/docker.ts';
 
-export type TestTime = { check: string; pass: boolean; seconds: number };
+export type TestTime = { check: string; pass: boolean; seconds: number; skipped?: boolean };
 export type Timings = {
   started: string;
+  target: 'dev' | 'live';
   commit: string;
   image: { cacheHit: boolean; seconds: number } | null;
   unit: TestTime[];
@@ -40,7 +41,7 @@ const s = (n: number) => `${n.toFixed(1)}s`;
 export function formatTimings(t: Timings): string {
   const rows: [string, string][] = [];
   if (t.image) rows.push([`image (${t.image.cacheHit ? 'cache hit' : 'built'})`, s(t.image.seconds)]);
-  for (const u of t.unit) rows.push([`unit ${u.check}`, `${s(u.seconds)} ${u.pass ? 'pass' : 'FAIL'}`]);
+  for (const u of t.unit) rows.push([`${t.target === 'live' ? 'live' : 'unit'} ${u.check}`, `${s(u.seconds)} ${u.skipped ? 'skip' : u.pass ? 'pass' : 'FAIL'}`]);
   for (const p of t.profiles) {
     rows.push([`boot ${p.pod} (${p.tests.length} check(s), reset: ${p.reset})`, s(p.boot)]);
     for (const x of p.tests) rows.push([`  ${x.check}`, `${s(x.seconds)} ${x.pass ? 'pass' : 'FAIL'}`]);
