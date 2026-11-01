@@ -11,7 +11,7 @@ The `mc` command: list, pull, diff and push the server's files over SFTP.
 |------|-------------|
 | `path-guard` | Bash shim that runs `src/guard/cli.ts` with Node: `--staged`, `--range A..B` or `--history REV`, `--profile public\|private`; exit 2 lists every refused path with its reason |
 | `install-hooks` | Run by `make hooks`: writes `pre-commit`, `pre-push` and `pre-merge-commit` stubs to the shared hooks directory that exec the current checkout's `hooks/<name>`, or exit 2 when it is missing; refuses to overwrite a hook it didn't write |
-| `dev` | Bash shim that runs `src/dev/cli.ts`: `up`, `rebuild`, `restart`, `reset`, `down`, `status`, `logs`, `boot-report`, `join`; `--pod ID` (default `dev`). Uses `$MC_HOME/server/` and `$MC_HOME/.dev/`. Exit 2 on any refusal |
+| `dev` | Bash shim that runs `src/dev/cli.ts`: `up`, `rebuild`, `restart`, `reset`, `down`, `status`, `logs`, `boot-report`, `join`; `--pod ID` (default `dev`). Uses `$MC_HOME/server/` and `$MC_HOME/.dev/`. `MC_JAVA_OPTS` and `MC_DEV_MEMORY` size the server. `down --all` also removes the checkout's `mc-dev` images. Exit 2 on any refusal |
 | `mc` | Bash script. Parses `.env` without sourcing it, maps it to `RCLONE_CONFIG_PEBBLE_*` environment variables (password obscured through stdin), and runs rclone with `RCLONE_CONFIG=/dev/null` |
 
 ## For AI Agents
