@@ -39,8 +39,11 @@ main_log() { git -C "$MC_HOME" log --format=%s main; }
 
 # A sync with stdin closed and a hard timeout.
 dev_sync() { timeout 120 "$dev" sync "$@" </dev/null; }
-# Live's tracked files, dated well before any listing: only the 2 s window
-# test wants a file the last listing could have caught mid-write.
+# The start (epoch seconds, floored) of the listing the last sync stored.
+listing_start() { node -e 'process.stdout.write(String(Math.floor(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).start)))' "$MC_HOME/.dev/sync-listing.json"; }
+# Live's tracked files, dated well before any listing. The newest of them
+# still fall in the window (120 s before the newest live mtime), so a sync
+# with no change re-fetches them; older files stay put.
 age() { live 'find server.properties purpur.jar plugins $(ls -d libraries 2>/dev/null) -type f -exec touch -d "2026-10-01 00:00:00" {} +'; }
 
 @test "sync commits live drift on main only; a no-op or data-only change makes no commit" {
@@ -211,21 +214,22 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
   [[ $output == *"sync-rules skip plugins/ajLeaderboards/past-resets/ covers it"* ]]
 }
 
-@test "a second sync with no change downloads nothing and commits nothing; a changed file is one download and one drift commit; a file gone from live is removed" {
+@test "a second sync with no change downloads no changed file and commits nothing; a changed file is one download and one drift commit; a file gone from live is removed" {
   live 'printf "a: 1\n" >plugins/Eco/gone.yml'
   age
+  live 'touch -d "2026-09-01 00:00:00" plugins/Eco/config.yml'
   run dev_sync
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *'sync: full pull (no stored listing)'* ]]
   [[ $output == *'sync: done in '* ]]
   before=$(git -C "$MC_HOME" rev-parse main)
-  # An unreadable file on live: any download attempt of it would fail.
+  # Unreadable on live and older than the window: downloading it would fail.
   live 'chmod 000 plugins/Eco/config.yml'
   run dev_sync
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *'sync: downloaded 0 files, removed 0'* ]]
+  [[ $output == *'sync: downloaded 0 changed files, removed 0; re-fetched 3 in the window'* ]]
   [[ $output == *'sync: no live drift'* ]]
   [[ $output == *'sync: done in '* ]]
   [ "$(git -C "$MC_HOME" rev-parse main)" = "$before" ]
@@ -233,39 +237,40 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
   run dev_sync
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *'sync: downloaded 1 files, removed 0'* ]]
+  [[ $output == *'sync: downloaded 1 changed files, removed 0'* ]]
   [ "$(main_log | head -1)" = 'live drift: 1 files' ]
   [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/config.yml)" = 'rate: 22' ]
   live 'rm plugins/Eco/gone.yml'
   run dev_sync
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *'sync: downloaded 0 files, removed 1'* ]]
+  [[ $output == *'sync: downloaded 0 changed files, removed 1'* ]]
   [ "$(main_log | head -1)" = 'live drift: 1 files' ]
   [ "$(git -C "$MC_HOME" show --format= --name-status main)" = "$(printf 'D\tserver/plugins/Eco/gone.yml')" ]
 }
 
-@test "a same-size edit within 2 s of the last listing, keeping the modtime, is pulled again" {
+@test "a same-size edit that keeps a modtime inside the window is pulled again" {
   age
   dev_sync
-  # Written just before the listing, then rewritten in the same second
-  # after it: same size, same modtime.
-  live 'printf "rate: 3\n" >plugins/Eco/config.yml'
+  # Dated at the stored listing's start, so the next listing stores it in
+  # the window; then rewritten at the same size with the same modtime.
+  at=$(listing_start)
+  live "printf 'rate: 3\n' >plugins/Eco/config.yml && touch -d @$at plugins/Eco/config.yml"
   run dev_sync
   echo "$output"
   [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/config.yml)" = 'rate: 3' ]
-  live 'touch -r plugins/Eco/config.yml /tmp/ref && printf "rate: 4\n" >plugins/Eco/config.yml && touch -r /tmp/ref plugins/Eco/config.yml'
+  live "printf 'rate: 4\n' >plugins/Eco/config.yml && touch -d @$at plugins/Eco/config.yml"
   run dev_sync
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *'sync: downloaded 1 files, removed 0'* ]]
+  [[ $output == *'sync: downloaded 0 changed files, removed 0; re-fetched '* ]]
   [ "$(main_log | head -1)" = 'live drift: 1 files' ]
   [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/config.yml)" = 'rate: 4' ]
 }
 
-@test "libraries/ is listed again only when a root jar changes, or with --full" {
+@test "libraries/ is listed again only when a root jar or a plugins/*.jar changes, when sync-rules change, or with --full" {
   docker exec "$SFTP_CONTAINER" sh -c "mkdir /home/mc/libraries && chown $SFTP_UID /home/mc/libraries"
-  live 'mkdir -p libraries/a && printf "l1" >libraries/a/one.jar'
+  live 'mkdir -p libraries/a && printf "l1" >libraries/a/one.jar && printf "p1" >plugins/Eco.jar'
   age
   dev_sync
   git -C "$MC_HOME" cat-file -e main:server/libraries/a/one.jar
@@ -274,26 +279,77 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
   run dev_sync
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *'sync: libraries, versions, cache: kept the last listing (no root jar changed)'* ]]
+  [[ $output == *'sync: libraries, versions, cache: kept the last listing (no jar or sync-rules change)'* ]]
   [[ $output == *'sync: no live drift'* ]]
   live 'printf "jar 2\n" >purpur.jar'
   age
   run dev_sync
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *'sync: libraries, versions, cache: listed again (a root jar changed)'* ]]
+  [[ $output == *'sync: libraries, versions, cache: listed again (a root or plugins/ jar changed)'* ]]
   [ "$(main_log | head -1)" = 'live drift: 2 files' ]
   git -C "$MC_HOME" cat-file -e main:server/libraries/a/two.jar
-  live 'printf "l3" >libraries/a/three.jar'
+  live 'printf "l3" >libraries/a/three.jar && printf "p22" >plugins/Eco.jar'
+  age
+  run dev_sync
+  echo "$output"
+  [[ $output == *'listed again (a root or plugins/ jar changed)'* ]]
+  [ "$(main_log | head -1)" = 'live drift: 2 files' ]
+  git -C "$MC_HOME" cat-file -e main:server/libraries/a/three.jar
+  live 'printf "l4" >libraries/a/four.jar'
+  age
+  printf '%s\n' "$(cat "$BATS_TEST_DIRNAME/../../templates/sync-rules")" 'skip libraries/a/one.jar' >"$MC_HOME/.dev/sync/sync-rules"
+  git -C "$MC_HOME/.dev/sync" add sync-rules
+  git -C "$MC_HOME/.dev/sync" commit -q -m 'skip one.jar'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'listed again (sync-rules changed)'* ]]
+  git -C "$MC_HOME" cat-file -e main:server/libraries/a/four.jar
+  run git -C "$MC_HOME" cat-file -e main:server/libraries/a/one.jar
+  [ "$status" -ne 0 ]
+  live 'printf "l5" >libraries/a/five.jar'
   age
   run dev_sync --full
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *'sync: full pull (--full)'* ]]
   [ "$(main_log | head -1)" = 'live drift: 1 files' ]
-  git -C "$MC_HOME" cat-file -e main:server/libraries/a/three.jar
+  git -C "$MC_HOME" cat-file -e main:server/libraries/a/five.jar
   run dev_sync
-  [[ $output == *'sync: downloaded 0 files, removed 0'* ]]
+  [[ $output == *'sync: downloaded 0 changed files, removed 0'* ]]
+}
+
+@test "a download that fails midway exits 2 with no drift commit and the stored listing unchanged; the next sync recovers" {
+  age
+  dev_sync
+  listing=$(cat "$MC_HOME/.dev/sync-listing.json")
+  before=$(git -C "$MC_HOME" rev-parse main)
+  live 'printf "a: 1\n" >plugins/Eco/a.yml && printf "b: 1\n" >plugins/Eco/b.yml && chmod 000 plugins/Eco/b.yml'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [[ $output == *'download of '*' files failed'* ]]
+  [ "$(git -C "$MC_HOME" rev-parse main)" = "$before" ]
+  [ "$(cat "$MC_HOME/.dev/sync-listing.json")" = "$listing" ]
+  live 'chmod 644 plugins/Eco/b.yml'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(main_log | head -1)" = 'live drift: 2 files' ]
+  [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/b.yml)" = 'b: 1' ]
+}
+
+@test "a directory replaced by a file on live syncs: the emptied directory is pruned" {
+  live 'mkdir -p plugins/Eco/thing && printf "x\n" >plugins/Eco/thing/a.yml'
+  age
+  dev_sync
+  live 'rm -r plugins/Eco/thing && printf "file\n" >plugins/Eco/thing'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(main_log | head -1)" = 'live drift: 2 files' ]
+  [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/thing)" = 'file' ]
 }
 
 @test "data and skip rules match names in any case; a stored listing that no longer matches main falls back to a full pull" {

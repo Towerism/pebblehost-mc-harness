@@ -2,14 +2,15 @@
 // rewrites during the copy fails the sync once, quoting rclone's line and
 // saying to run it again (one attempt, no loop, no drift commit), and a
 // --with-data path a skip rule covers is refused before anything runs. The
-// incremental sync's listing parse and diff, and its timing line.
+// incremental sync's listing parse, window, diff and jar key, and its timing
+// line.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HARNESS_ROOT } from '../../src/dev/image.ts';
-import { diffListing, parseListing, timing } from '../../src/sync/sync.ts';
+import { diffListing, jarKey, parseListing, timing, windowStart } from '../../src/sync/sync.ts';
 import { commit, ENV, git, tmp } from './project.ts';
 
 function setup(): { root: string; log: string; dev: (...args: string[]) => ReturnType<typeof spawnSync> } {
@@ -63,8 +64,17 @@ test('parseListing reads bin/mc ls -R -l lines, keeping spaces in names', () => 
   });
 });
 
-test('diffListing fetches new, resized and re-dated files and those inside the 2 s window, and removes files gone from live', () => {
-  const start = Date.parse('2026-11-01T12:00:10Z') / 1000;
+test('the window starts 120 s before the listing start or the newest live mtime, whichever is earlier', () => {
+  const start = Date.parse('2026-11-01T12:00:00Z') / 1000;
+  const files = { a: { size: 1, time: '2026-11-01 11:00:00' }, b: { size: 1, time: '2026-11-01 11:30:00' } };
+  assert.equal(windowStart(start, files), Date.parse('2026-11-01T11:28:00Z') / 1000);
+  // Live's clock ahead of this machine's: the listing start bounds it.
+  assert.equal(windowStart(start, { c: { size: 1, time: '2026-11-01 12:05:00' } }), start - 120);
+  assert.equal(windowStart(start, {}), start - 120);
+});
+
+test('diffListing fetches new, resized and re-dated files, re-checks unchanged ones inside the window, and removes files gone from live', () => {
+  const since = Date.parse('2026-11-01T12:00:08Z') / 1000;
   const prev = {
     same: { size: 1, time: '2026-11-01 11:00:00' },
     resized: { size: 1, time: '2026-11-01 11:00:00' },
@@ -81,13 +91,22 @@ test('diffListing fetches new, resized and re-dated files and those inside the 2
     before: { size: 1, time: '2026-11-01 12:00:07' },
     added: { size: 1, time: '2026-11-01 11:00:00' },
   };
-  assert.deepEqual(diffListing(prev, next, start), { fetch: ['added', 'edge', 'redated', 'resized'], remove: ['gone'] });
-  assert.deepEqual(diffListing(next, next, Date.parse('2026-11-02T00:00:00Z') / 1000), { fetch: [], remove: [] });
+  assert.deepEqual(diffListing(prev, next, since), { fetch: ['added', 'redated', 'resized'], recheck: ['edge'], remove: ['gone'] });
+  assert.deepEqual(diffListing(next, next, Date.parse('2026-11-02T00:00:00Z') / 1000), { fetch: [], recheck: [], remove: [] });
 });
 
-test('the timing line warns OVER BUDGET only for an incremental sync with no downloads past 30 s', () => {
+test('the jar-roots key covers root jars and top-level plugins/*.jar only', () => {
+  const base = { 'purpur.jar': { size: 1, time: '2026-11-01 11:00:00' }, 'plugins/Eco.jar': { size: 1, time: '2026-11-01 11:00:00' }, 'plugins/Eco/lib.jar': { size: 1, time: '2026-11-01 11:00:00' }, 'plugins/Eco/config.yml': { size: 1, time: '2026-11-01 11:00:00' } };
+  const key = jarKey(base);
+  assert.notEqual(jarKey({ ...base, 'plugins/Eco.jar': { size: 2, time: '2026-11-01 11:00:00' } }), key);
+  assert.notEqual(jarKey({ ...base, 'plugins/New.JAR': { size: 1, time: '2026-11-01 11:00:00' } }), key);
+  assert.notEqual(jarKey({ ...base, 'purpur.jar': { size: 1, time: '2026-11-01 11:00:01' } }), key);
+  assert.equal(jarKey({ ...base, 'plugins/Eco/lib.jar': { size: 9, time: '2026-11-01 11:00:00' }, 'plugins/Eco/config.yml': { size: 9, time: '2026-11-01 11:00:00' } }), key);
+});
+
+test('the timing line warns OVER BUDGET only for an incremental sync with no changed files past 30 s', () => {
   assert.equal(timing(12.34, true, 0), 'sync: done in 12.3s');
-  assert.match(timing(31, true, 0), /^sync: done in 31\.0s\nsync: OVER BUDGET: an incremental sync with no downloads took over 30s/);
+  assert.match(timing(31, true, 0), /^sync: done in 31\.0s\nsync: OVER BUDGET: an incremental sync with no changed files took over 30s/);
   assert.equal(timing(31, true, 3), 'sync: done in 31.0s');
   assert.equal(timing(300, false, 0), 'sync: done in 300.0s');
 });
