@@ -47,7 +47,9 @@ export function botOps(create: CreateBot, t: BotTarget): Record<string, Handler>
   const quit = async (name: string, s: Session) => {
     bots.delete(name);
     s.bot.quit();
-    await Promise.race([s.ended, new Promise((r) => setTimeout(r, 5000))]);
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([s.ended, new Promise((r) => (timer = setTimeout(r, 5000)))]);
+    clearTimeout(timer);
   };
   return {
     // Resolves once the bot has spawned in the world.
