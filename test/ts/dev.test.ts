@@ -110,6 +110,14 @@ test('every override in a file applies in order to one rewritten copy', () => {
   assert.equal(a?.set, 2);
 });
 
+test("the host's assigned server-port goes back to 25565, where the relay and join proxy connect", () => {
+  const cfg = tmp();
+  write(cfg, { 'server.properties': 'online-mode=true\nserver-port=25571\nmotd=hi\n' });
+  assert.equal(applyOverrides(cfg).find((x) => x.file === 'server.properties')?.content, 'online-mode=false\nserver-port=25565\nmotd=hi\n');
+  write(cfg, { 'server.properties': 'online-mode=false\nserver-port=25565\n' });
+  assert.equal(applyOverrides(cfg).find((x) => x.file === 'server.properties')?.content, 'online-mode=false\nserver-port=25565\n');
+});
+
 test('an override is a no-op with a note when its file or key is absent', () => {
   const all = applyOverrides(tmp());
   assert.ok(all.every((a) => a.content === null && a.set === 0));
