@@ -172,9 +172,12 @@ export function stepCached(output: string, step: string): boolean {
 
 export type Built = { tag: string; id: Identity; cacheHit: boolean; jarLayerCached: boolean; notes: string[] };
 
+// The tag carries the project: two checkouts with the same server tree would
+// otherwise share one tag, and a build in one would retag (and relabel, with
+// its own commit) the image the other is about to run.
 export function build(src: Source, d: Docker, project: string, harnessRoot = HARNESS_ROOT): Built {
   const id = identity(src, harnessRoot);
-  const tag = `mc-dev:${id.image}`;
+  const tag = `mc-dev:${project}-${id.image}`;
   if (d(['image', 'inspect', tag]).status === 0) return { tag, id, cacheHit: true, jarLayerCached: true, notes: [] };
   const ctx = mkdtempSync(join(privateDir(join(src.root, '.dev')), 'build-'));
   try {
@@ -191,12 +194,13 @@ export function build(src: Source, d: Docker, project: string, harnessRoot = HAR
   }
 }
 
-// The relay image, mc-relay:<hash of RELAY_INPUTS>, built once per change to
-// them. It holds no server files.
+// The relay image, mc-relay:<project>-<hash of RELAY_INPUTS>, built once per
+// change to them. It holds no server files; the project keeps each
+// checkout's down --all and prune to its own image.
 export function buildRelay(d: Docker, project: string, root: string, harnessRoot = HARNESS_ROOT): string {
   const h = createHash('sha256');
   for (const f of RELAY_INPUTS) h.update(`${f}\n${sha256(readFileSync(join(harnessRoot, f)))}\n`);
-  const tag = `mc-relay:${h.digest('hex')}`;
+  const tag = `mc-relay:${project}-${h.digest('hex')}`;
   if (d(['image', 'inspect', tag]).status === 0) return tag;
   const ctx = mkdtempSync(join(privateDir(join(root, '.dev')), 'relay-'));
   try {
