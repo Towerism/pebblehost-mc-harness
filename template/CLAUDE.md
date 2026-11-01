@@ -10,7 +10,7 @@ This private repo holds one Minecraft server's files, hosted on PebbleHost. It p
 
 - `server/` on `main` mirrors live. Only `bin/dev sync` writes it. It commits `live drift: <n> files`.
 - `sync-rules`: `skip` paths are never transferred or committed, `data` paths are pulled only by `bin/dev seed N --with-data` and never committed, and `review` entries are proposals from `bin/dev inventory`. Promote each review entry to `skip` or `data`, or delete it.
-- `checks/<n>-<slug>/`: one check per issue (`profile.json`, `*.test.ts`, fixtures), importing only `#harness/dev`, `#harness/bot` and `#harness/unit`.
+- `checks/<n>-<slug>/`: one check per issue (`profile.json`, `*.test.ts`, fixtures), importing only `#harness/dev`, `#harness/bot` and `#harness/unit`. A database fixture is committed as SQL, never as a `.db`: `"sqlite": {"plugins/X/data.db": "x.sql"}` in `profile.json` builds it on the pod.
 - `.verify/runs/issue-N.jsonl`: the run records the gate reads. Commit them.
 - `docs/postmortems/`, `docs/runbooks/`: written by `bin/check` after the gate.
 - `.dev/`: pods' scratch, the `main` worktree of sync, seeds, runbook homes and journals. Not committed; it holds live files.
