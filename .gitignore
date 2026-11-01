@@ -3,3 +3,5 @@
 !.env.example
 server/
 backups/
+.mc/
+.omc/
