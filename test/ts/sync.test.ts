@@ -2,14 +2,15 @@
 // rewrites during the copy fails the sync once, quoting rclone's line and
 // saying to run it again (one attempt, no loop, no drift commit), and a
 // --with-data path a skip rule covers is refused before anything runs. The
-// incremental sync's listing parse, window and diff, and its timing line.
+// incremental sync's listing parse, window and diff, its timing line, and
+// mc() keeping excludes exact-case unless asked.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HARNESS_ROOT } from '../../src/dev/image.ts';
-import { diffListing, parseListing, timing, windowStart } from '../../src/sync/sync.ts';
+import { diffListing, mc, parseListing, timing, windowStart } from '../../src/sync/sync.ts';
 import { commit, ENV, git, tmp } from './project.ts';
 
 function setup(): { root: string; log: string; dev: (...args: string[]) => ReturnType<typeof spawnSync> } {
@@ -99,4 +100,24 @@ test('the timing line warns OVER BUDGET only for an incremental sync with no cha
   assert.match(timing(31, true, 0), /^sync: done in 31\.0s\nsync: OVER BUDGET: an incremental sync with no changed files took over 30s/);
   assert.equal(timing(31, true, 3), 'sync: done in 31.0s');
   assert.equal(timing(300, false, 0), 'sync: done in 300.0s');
+});
+
+test('mc() drops an inherited MC_EXCLUDE_IGNORE_CASE: excludes stay exact-case unless the caller asks', () => {
+  const { root, log } = setup();
+  const ex = join(root, 'ex');
+  writeFileSync(ex, '/Config/**\n');
+  const saved = { path: process.env.PATH, nocase: process.env.MC_EXCLUDE_IGNORE_CASE };
+  process.env.PATH = `${join(root, '..', 'bin')}:${process.env.PATH}`;
+  process.env.MC_EXCLUDE_IGNORE_CASE = '1';
+  try {
+    mc(join(root, 'home'), root, ['ls', 'plugins'], ex);
+    assert.match(readFileSync(log, 'utf8'), /--exclude-from/);
+    assert.doesNotMatch(readFileSync(log, 'utf8'), /--ignore-case/);
+    mc(join(root, 'home'), root, ['ls', 'plugins'], ex, { MC_EXCLUDE_IGNORE_CASE: '1' });
+    assert.match(readFileSync(log, 'utf8'), /--ignore-case --exclude-from/);
+  } finally {
+    process.env.PATH = saved.path;
+    if (saved.nocase === undefined) delete process.env.MC_EXCLUDE_IGNORE_CASE;
+    else process.env.MC_EXCLUDE_IGNORE_CASE = saved.nocase;
+  }
 });

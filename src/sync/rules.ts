@@ -74,7 +74,8 @@ export function matchRule(rules: Rule[], rel: string, classes: RuleClass[] = ['s
 // anchored rules are made relative to base, and dropped when outside it.
 // \, {} and [] are rclone glob syntax but literal in rules: escaped. rclone's
 // **/ needs at least one directory, so it becomes {**/,} to match zero too.
-// bin/mc passes --ignore-case with the file, as rules ignore case.
+// Rules ignore case: callers pass MC_EXCLUDE_IGNORE_CASE=1 (RULES_CASE in
+// sync.ts), so bin/mc adds --ignore-case.
 export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): string {
   const out: string[] = [];
   const b = base.replace(/^\/+|\/+$/g, '');

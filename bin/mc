@@ -62,7 +62,7 @@ relative to the path given): matching paths are left out of every listing
 and transfer of a directory (rclone takes no filters on a single file;
 bin/dev sync writes one per directory from sync-rules).
 MC_EXCLUDE_IGNORE_CASE=1 matches both filter files ignoring case, as
-sync-rules do; bin/dev sync and seed set it.
+sync-rules do; bin/dev sync, seed and inventory set it.
 MC_FILTER_FILE names an rclone filter file (+/- rules) for ls only:
 bin/dev sync lists its tracked roots in one call with it.
 Exit codes: 0 ok, 1 diff found differences, 2 error.
