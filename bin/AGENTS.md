@@ -9,6 +9,7 @@ The `mc` command: list, pull, diff and push the server's files over SFTP.
 ## Key Files
 | File | Description |
 |------|-------------|
+| `path-guard` | Bash shim that runs `src/guard/cli.ts` with Node: `--staged` or `--range A..B`, `--profile public\|private`; exit 2 lists every refused path with its reason |
 | `mc` | Bash script. Parses `.env` without sourcing it, maps it to `RCLONE_CONFIG_PEBBLE_*` environment variables (password obscured through stdin), and runs rclone with `RCLONE_CONFIG=/dev/null` |
 
 ## For AI Agents

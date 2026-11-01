@@ -30,7 +30,7 @@ Exit codes: 0 ok, 1 differences found (`diff` only), 2 error.
 - `pull`, `diff` and `push` on the server root need `--all`; don't use it without the user asking.
 - While the server runs, plugins rewrite their data files at any time. Push config files, not whole data folders.
 
-`server/`, `backups/` and `.mc/` are git-ignored: server files can hold plugin database passwords and must not be committed to this public repo.
+`server/`, `backups/` and `.mc/` are git-ignored: server files can hold plugin database passwords and must not be committed to this public repo. Run `make hooks` once per clone: the pre-commit and pre-push hooks run `bin/path-guard`, which refuses any path outside the public allowlist (exit 2). If something leaks anyway, follow `docs/leak-response.md`.
 
 ## Taking a task
 
@@ -42,4 +42,4 @@ Exit codes: 0 ok, 1 differences found (`diff` only), 2 error.
 
 ## Tests
 
-`make test-unit` (stubbed rclone, about a second), `make test-integration` (one shared `atmoz/sftp` Docker container for the whole run), `make lint`, and `make test-live` for a read-only `ls` against the real server.
+Run `npm ci` once first. `make test-unit` (stubbed rclone, path-guard hooks in temp repos and `node --test test/ts/`, about a second), `make test-integration` (one shared `atmoz/sftp` Docker container for the whole run), `make lint` (shellcheck and `tsc --noEmit`), and `make test-live` for a read-only `ls` against the real server.
