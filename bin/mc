@@ -34,10 +34,11 @@ export TZ=UTC
 
 usage() {
   cat <<'EOF'
-usage: mc <command> [path] [--all] [-l]
+usage: mc <command> [path] [--all] [-l] [-R]
 
   ls   [path]  list one remote directory level (dirs end in /);
-               -l, --long adds size in bytes and modtime (UTC)
+               -l, --long adds size in bytes and modtime (UTC);
+               -R, --recursive lists every file below instead
   pull <path>  copy remote path into server/<path>; unpushed local edits
                there are moved to backups/<ts>/local/ first
   diff <path>  diff remote path against server/<path>; exit 1 if they differ
@@ -49,6 +50,10 @@ pull, diff and push on the server root (no path or .) need --all.
 Paths are relative to the server root, e.g. plugins/CrateReloaded/config.yml
 From a linked git worktree, .env (when the worktree has none) and backups/
 are the main checkout's; server/ and .mc/ stay in the worktree.
+MC_EXCLUDE_FILE names an rclone exclude file (one pattern per line, matched
+relative to the path given): matching paths are left out of every listing
+and transfer of a directory (rclone takes no filters on a single file;
+bin/dev sync writes one per directory from sync-rules).
 Exit codes: 0 ok, 1 diff found differences, 2 error.
 EOF
 }
@@ -116,10 +121,17 @@ clean_path() {
 
 remote() { printf 'pebble:%s' "$1"; }
 
+# Paths every listing and transfer leaves out (MC_EXCLUDE_FILE).
+filter=()
+if [[ -n ${MC_EXCLUDE_FILE:-} ]]; then
+  [[ -f $MC_EXCLUDE_FILE ]] || die "MC_EXCLUDE_FILE $MC_EXCLUDE_FILE not found"
+  filter=(--exclude-from "$MC_EXCLUDE_FILE")
+fi
+
 state_file() { printf '%s/%s/%s' "$state" "$1" "$(printf '%s' "$2" | sha1sum | cut -d' ' -f1)"; }
 
 # Path, size and modtime of every remote file under $1; SFTP gives no hashes.
-snapshot() { rclone lsf -R --files-only --format pst --separator '|' "$(remote "$1")" | sort; }
+snapshot() { rclone lsf -R --files-only --format pst --separator '|' "${filter[@]}" "$(remote "$1")" | sort; }
 
 # Checksums of the local mirror under $1, to tell unpushed edits from a clean pull.
 local_manifest() { find "$mirror/$1" -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha1sum; }
@@ -132,10 +144,12 @@ new_backup() {
 }
 
 cmd_ls() {
-  ((long)) || { rclone lsf "$(remote "$1")"; return; }
+  local rec=()
+  ((recursive)) && rec=(-R --files-only)
+  ((long)) || { rclone lsf "${rec[@]}" "${filter[@]}" "$(remote "$1")"; return; }
   local size time name
   # Name last, so a | in a name stays in the name; directories have size -1.
-  rclone lsf --format stp --separator '|' "$(remote "$1")" | while IFS='|' read -r size time name; do
+  rclone lsf "${rec[@]}" --format stp --separator '|' "${filter[@]}" "$(remote "$1")" | while IFS='|' read -r size time name; do
     ((size >= 0)) || size=-
     printf '%12s  %s  %s\n' "$size" "$time" "$name"
   done
@@ -156,7 +170,7 @@ cmd_pull() {
     rm -rf "${mirror:?}/$p"
   fi
   # --ignore-times: SFTP modtimes have 1s precision, so an equal-size edit can look unchanged.
-  rclone copyto --ignore-times "$(remote "$p")" "$mirror/$p"
+  rclone copyto --ignore-times "${filter[@]}" "$(remote "$p")" "$mirror/$p"
   mv "$tmp/snapshot" "$(state_file remote "$p")"
   local_manifest "$p" >"$(state_file local "$p")"
   echo "pulled ${p:-.} -> server/$p"
@@ -165,7 +179,7 @@ cmd_pull() {
 cmd_diff() {
   local p=$1 rc=0
   [[ -e $mirror/$p ]] || die "server/$p not found; pull it first"
-  rclone copyto "$(remote "$p")" "$tmp/remote/$p" || die "could not download '$p'"
+  rclone copyto "${filter[@]}" "$(remote "$p")" "$tmp/remote/$p" || die "could not download '$p'"
   diff -ruN "$tmp/remote/$p" "$mirror/$p" | sed -e "s#$tmp/remote/#remote/#" -e "s#$mirror/#server/#" || rc=$?
   return "$rc"
 }
@@ -179,9 +193,9 @@ cmd_push() {
   diff -q "$snap" "$tmp/snapshot" >/dev/null ||
     die "remote '$p' changed since the last pull; pull again (it moves your edits to $(show "$backups")/<ts>/local/) and redo them"
   backup=$(new_backup)
-  rclone copyto "$(remote "$p")" "$backup/remote/$p"
+  rclone copyto "${filter[@]}" "$(remote "$p")" "$backup/remote/$p"
   # --inplace: PebbleHost's SFTP refuses renaming rclone's .partial upload over the target.
-  rclone copyto --inplace --ignore-times "$mirror/$p" "$(remote "$p")" ||
+  rclone copyto --inplace --ignore-times "${filter[@]}" "$mirror/$p" "$(remote "$p")" ||
     die "upload failed partway; the previous remote copy is in $(show "$backup")/remote/$p"
   snapshot "$p" >"$snap"
   local_manifest "$p" >"$(state_file local "$p")"
@@ -190,13 +204,14 @@ cmd_push() {
 
 main() {
   local cmd=${1:-} path="" all=0 arg
-  long=0
+  long=0 recursive=0
   [[ -n $cmd ]] || { usage; exit 2; }
   shift
   for arg in "$@"; do
     case $arg in
       --all) all=1 ;;
       -l | --long) long=1 ;;
+      -R | --recursive) recursive=1 ;;
       -h | --help) usage; exit 0 ;;
       -*) die "unknown option: $arg" ;;
       *) [[ -z $path ]] || die "one path at a time"; path=$(clean_path "$arg") ;;
@@ -206,7 +221,7 @@ main() {
   case $cmd in
     ls) ;;
     pull | diff | push)
-      [[ $long == 0 ]] || die "-l works only with ls"
+      [[ $long == 0 && $recursive == 0 ]] || die "-l and -R work only with ls"
       [[ -n $path || $all == 1 ]] || die "$cmd on the server root needs --all"
       ;;
     -h | --help | help) usage; exit 0 ;;
