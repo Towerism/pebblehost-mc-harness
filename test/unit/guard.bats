@@ -198,6 +198,19 @@ setup() {
   [[ $output == *"docs/a.txt: identical to server file server/a.yml"* ]]
 }
 
+@test "in a linked worktree, a copy of the main checkout's backup is refused" {
+  mkdir -p backups/1/remote
+  printf 'motd: main\n' >backups/1/remote/server.yml
+  git worktree add -q "$BATS_TEST_TMPDIR/wt"
+  cd "$BATS_TEST_TMPDIR/wt"
+  mkdir docs
+  printf 'motd: main\n' >docs/m.yml
+  git add docs/m.yml
+  run "$hooks/pre-commit"
+  [ "$status" -eq 2 ]
+  [[ $output == *"docs/m.yml: identical to server file $repo/backups/1/remote/server.yml"* ]]
+}
+
 @test "inside a submodule, a copy of the superproject's server file is refused" {
   super=$BATS_TEST_TMPDIR/super
   git init -q -b main "$super"

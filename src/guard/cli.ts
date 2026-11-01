@@ -87,6 +87,9 @@ function serverBlobs(): Map<string, string> {
     blobs.set(meta.split(' ')[1], path);
   }
   const roots = [top];
+  // In a linked worktree, bin/mc keeps backups/ in the main checkout.
+  const main = /^worktree (.*)\n(?!bare)/.exec(gitOrNull(['worktree', 'list', '--porcelain']) + '\n')?.[1];
+  if (main && main !== top) roots.push(main);
   const sup = gitOrNull(['rev-parse', '--show-superproject-working-tree']);
   if (sup) {
     roots.push(sup);
