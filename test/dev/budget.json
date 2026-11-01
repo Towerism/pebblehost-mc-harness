@@ -1,0 +1,6 @@
+{
+  "server": "purpur 26.1.2 build 2592, vanilla, flat world, view-distance 3",
+  "measured": "2026-11-01",
+  "doneSeconds": { "firstBoot": 4.75, "restartMedian": 4.06 },
+  "wallSeconds": { "upWithImageBuild": 23.6, "restart": 7.2 }
+}

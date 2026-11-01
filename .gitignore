@@ -6,3 +6,4 @@ backups/
 .mc/
 .omc/
 node_modules/
+.dev/
