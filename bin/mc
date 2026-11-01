@@ -142,7 +142,8 @@ cmd_push() {
     die "remote '$p' changed since the last pull; pull again (your edits are kept in backups/) and redo them"
   backup=$(new_backup)
   rclone copyto "$(remote "$p")" "$backup/remote/$p"
-  rclone copyto --ignore-times "$mirror/$p" "$(remote "$p")" ||
+  # --inplace: PebbleHost's SFTP refuses renaming rclone's .partial upload over the target.
+  rclone copyto --inplace --ignore-times "$mirror/$p" "$(remote "$p")" ||
     die "upload failed partway; the previous remote copy is in ${backup#"$home"/}/remote/$p"
   snapshot "$p" >"$snap"
   local_manifest "$p" >"$(state_file local "$p")"
