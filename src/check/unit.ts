@@ -50,7 +50,7 @@ export function bareText(file: string, path: string, literal: string): void {
   const { MC_HOME: home, MC_COMMIT: commit } = process.env;
   if (!home || !commit) throw new Error('MC_HOME or MC_COMMIT is not set: run checks with bin/check run');
   if (file.startsWith('/') || file.split('/').includes('..')) throw new Error(`bad server path ${file}`);
-  const r = spawnSync('git', ['-C', home, 'show', `${commit}:server/${file}`], { encoding: 'utf8' });
+  const r = spawnSync('git', ['-C', home, 'show', `${commit}:server/${file}`], { encoding: 'utf8', env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   if (r.status !== 0) throw new Error(`server/${file} is not tracked at ${commit.slice(0, 12)}`);
   assert.equal(readValue(r.stdout, file, path), literal, `${file} ${path}`);
 }

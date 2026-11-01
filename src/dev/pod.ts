@@ -160,6 +160,21 @@ export function isExplored(p: Pod, d: Docker): boolean {
   return d(['exec', names(p).server, 'test', '-e', EXPLORED]).status === 0;
 }
 
+// Every bin/check run on a volume appends a line here; the gate counts only
+// a red or green that was the first run on its volume, so no other check
+// can have changed the server before it.
+export const RUN_LOG = '/server/.mc-harness-runs';
+
+// Append a line to the volume's run log; returns how many runs it held before.
+export function logRun(p: Pod, d: Docker, line: string): number {
+  const server = names(p).server;
+  const prior = d(['exec', server, 'cat', RUN_LOG]);
+  const n = prior.status === 0 ? prior.stdout.split('\n').filter(Boolean).length : 0;
+  const r = d(['exec', '-i', server, 'sh', '-c', `cat >>${RUN_LOG}`], { input: `${line}\n` });
+  if (r.status !== 0) fail(`cannot append to ${RUN_LOG}: ${r.stderr.trim()}`);
+  return n;
+}
+
 function ids(d: Docker, kind: 'container' | 'volume' | 'network', filters: string[]): string[] {
   const args = kind === 'container' ? ['ps', '-aq'] : [kind, 'ls', '-q'];
   for (const f of filters) args.push('--filter', `label=${f}`);

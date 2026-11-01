@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { boot } from '../dev/cli.ts';
 import { fail, type Docker } from '../dev/docker.ts';
-import { dirtyServer, git, labels, source } from '../dev/image.ts';
-import { isExplored, names, podOf, readPodFile, state } from '../dev/pod.ts';
+import { dirtyHarness, dirtyServer, git, labels, source, toolHash } from '../dev/image.ts';
+import { isExplored, logRun, names, podOf, readPodFile, state } from '../dev/pod.ts';
 import { appendRecord, type Kind, type RunRecord } from './record.ts';
 
 export type Profile = { kind: Kind };
@@ -27,11 +27,14 @@ export function readProfile(root: string, id: string): Profile {
   return p;
 }
 
-// The git tree id of the committed checks/<id>/; refuses uncommitted changes,
-// so a record always names a check the suite can run again.
+// The git tree id of the committed checks/<id>/; refuses uncommitted changes
+// and any untracked or ignored file there, so a record always names a check
+// the suite can run again.
 export function checkHash(root: string, id: string): string {
   const dirty = git(root, ['status', '--porcelain', '--untracked-files=all', '--', `checks/${id}`]).stdout.trim();
   if (dirty) fail(`checks/${id} has uncommitted changes; commit them first:\n${dirty}`);
+  const extra = git(root, ['ls-files', '--others', '--', `checks/${id}`]).stdout.trim();
+  if (extra) fail(`checks/${id} holds untracked or ignored files; remove them or commit them:\n${extra}`);
   const r = git(root, ['rev-parse', '--verify', '-q', `HEAD:checks/${id}`]);
   if (r.status !== 0) fail(`checks/${id} is not committed`);
   return r.stdout.trim();
@@ -49,17 +52,22 @@ const KEEP_ENV = ['PATH', 'HOME', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'MC_DOCKER',
 const LOADER = pathToFileURL(join(import.meta.dirname, 'loader.ts')).href;
 
 export function runCheck(o: RunOpts, d: Docker): Run {
+  const harness = dirtyHarness();
+  if (harness.length > 0) fail(`the harness has uncommitted changes; commit them first:\n${harness.join('\n')}`);
+  const tool = toolHash();
   const { kind } = readProfile(o.root, o.id);
   const hash = checkHash(o.root, o.id);
   const entries = readdirSync(join(o.root, 'checks', o.id), { withFileTypes: true });
-  const tests = entries.filter((e) => e.isFile() && e.name.endsWith('.test.ts')).map((e) => e.name).sort();
+  // Only the committed test files run (checkHash refused any other file).
+  const tests = git(o.root, ['ls-tree', `${hash}`]).stdout.split('\n').map((l) => /^\d+ blob \w+\t(.+\.test\.ts)$/.exec(l)?.[1]).filter((f): f is string => f !== undefined).sort();
   if (tests.length === 0) fail(`checks/${o.id} has no *.test.ts`);
   // A bare-text check is its test files and profile.json; anything else (a
   // package.json, a helper module, a directory) could change what it runs.
   const extra = entries.filter((e) => !(e.isFile() && (e.name === 'profile.json' || e.name.endsWith('.test.ts')))).map((e) => e.name);
   if (kind === 'bare-text' && extra.length > 0) fail(`checks/${o.id} is bare-text: only profile.json and *.test.ts are allowed, not ${extra.join(', ')}`);
   const p = podOf(o.root, o.pod);
-  let id: Pick<RunRecord, 'source' | 'commit' | 'treeHash' | 'harnessHash' | 'imageHash' | 'fixturesHash' | 'generation' | 'fresh' | 'explored' | 'containerId'>;
+  let id: Pick<RunRecord, 'source' | 'commit' | 'treeHash' | 'harnessHash' | 'imageHash' | 'fixturesHash' | 'generation' | 'fresh' | 'explored' | 'containerId' | 'runIndex'>;
+  const time = new Date().toISOString();
   if (kind === 'e2e') {
     if (o.fresh) boot(p, readPodFile(p), undefined, true, true);
     const server = names(p).server;
@@ -68,16 +76,15 @@ export function runCheck(o: RunOpts, d: Docker): Run {
     const l = labels(d, server);
     const gen = l['mc-harness.generation'] ?? '';
     const containerId = d(['inspect', '--format', '{{.Id}}', server]).stdout.trim();
-    id = { source: l['mc-harness.source'] ?? '', commit: l['mc-harness.commit'] ?? '', treeHash: l['mc-harness.tree'] ?? '', harnessHash: l['mc-harness.harness'] ?? '', imageHash: l['mc-harness.image'] ?? '', fixturesHash: l['mc-harness.fixtures'] ?? '', generation: gen, fresh: l['mc-harness.fresh'] === 'true', explored: isExplored(p, d), containerId };
+    id = { source: l['mc-harness.source'] ?? '', commit: l['mc-harness.commit'] ?? '', treeHash: l['mc-harness.tree'] ?? '', harnessHash: l['mc-harness.harness'] ?? '', imageHash: l['mc-harness.image'] ?? '', fixturesHash: l['mc-harness.fixtures'] ?? '', generation: gen, fresh: l['mc-harness.fresh'] === 'true', explored: isExplored(p, d), containerId, runIndex: logRun(p, d, `${time} issue-${o.issue} ${o.id}${o.confirm ? ' confirm' : ''}`) };
   } else {
     if (o.fresh) fail('--fresh is for e2e checks; a bare-text check needs no pod');
     const src = source(o.root);
     if (src.kind !== 'git') fail('a bare-text check reads the committed server/; server/ is not tracked');
     const dirty = dirtyServer(src);
     if (dirty.length > 0) fail(`server/ has uncommitted changes; a bare-text run reads HEAD, so commit them first:\n${dirty.join('\n')}`);
-    id = { source: 'head', commit: src.commit, treeHash: git(o.root, ['rev-parse', `${src.commit}:server`]).stdout.trim(), harnessHash: '', imageHash: '', fixturesHash: '', generation: '', fresh: false, explored: false, containerId: '' };
+    id = { source: 'head', commit: src.commit, treeHash: git(o.root, ['rev-parse', `${src.commit}:server`]).stdout.trim(), harnessHash: '', imageHash: '', fixturesHash: '', generation: '', fresh: false, explored: false, containerId: '', runIndex: 0 };
   }
-  const time = new Date().toISOString();
   const tmp = mkdtempSync(join(tmpdir(), 'check-'));
   try {
     const tap = join(tmp, 'tap');
@@ -101,7 +108,7 @@ export function runCheck(o: RunOpts, d: Docker): Run {
     const empty = files.filter((f) => top.some((m) => !m[1] && m[2] === f));
     if (top.length === 0 || empty.length > 0) fail(`${empty.join(', ') || `checks/${o.id}`} defines no test; nothing recorded\n${output}`);
     const pass = r.status === 0 && top.every((m) => !m[1]);
-    const record: RunRecord = { check: o.id, issue: o.issue, kind, target: 'dev', pass, time, ...id, checkHash: hash, confirm: o.confirm, output: output.trimEnd().split('\n').slice(-TAIL).join('\n') };
+    const record: RunRecord = { check: o.id, issue: o.issue, kind, target: 'dev', pass, time, ...id, checkHash: hash, toolHash: tool, confirm: o.confirm, output: output.trimEnd().split('\n').slice(-TAIL).join('\n') };
     appendRecord(o.root, record);
     return { record, output };
   } finally {

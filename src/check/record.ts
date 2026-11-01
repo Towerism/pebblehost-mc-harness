@@ -31,6 +31,10 @@ export type RunRecord = {
   fresh: boolean;
   explored: boolean;
   containerId: string;
+  // How many bin/check runs the volume had before this one (0: the first).
+  runIndex: number;
+  // The hash of the harness's check and gate code (toolHash).
+  toolHash: string;
   // A re-run of the green by bin/check gate.
   confirm: boolean;
   output: string;
