@@ -450,6 +450,11 @@ test('mergeFixtures: a failed build leaves the previous fixtures in place', () =
   const parent = tmp();
   const dest = join(parent, 'fixtures');
   const h = mergeFixtures([], dest, { 'd.db': join(sql, 'ok.sql') });
+  // .next and .old left by a killed run are cleared; the swap leaves neither.
+  write(parent, { 'fixtures.next/junk': 'j', 'fixtures.old/junk': 'j' });
+  assert.equal(mergeFixtures([], dest, { 'd.db': join(sql, 'ok.sql') }), h);
+  assert.deepEqual(readdirSync(parent), ['fixtures']);
+  assert.deepEqual(readdirSync(dest), ['d.db']);
   assert.throws(() => mergeFixtures([], dest, { 'd.db': join(sql, 'bad.sql') }), /sqlite fixture .*bad\.sql/);
   assert.equal(mergeFixtures([], join(tmp(), 'cmp'), { 'd.db': join(sql, 'ok.sql') }), h);
   const db = new DatabaseSync(join(dest, 'd.db'), { readOnly: true });

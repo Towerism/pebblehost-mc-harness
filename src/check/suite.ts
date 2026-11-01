@@ -78,8 +78,10 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
       const files = committedTests(o.root, id, checkHash(o.root, id), profile);
       const fixtures = fixtureDirs(o.root, id, profile);
       const sqlite = sqliteFixtures(o.root, id, profile);
-      const fixturesHash = mergeFixtures(fixtures, tmp, sqlite);
-      const hasData = profile.data.length > 0 || walk(tmp).some((rel) => isData(rel, profile));
+      // Inside the private mkdtemp dir, so the build's siblings are too.
+      const merged = join(tmp, 'fixtures');
+      const fixturesHash = mergeFixtures(fixtures, merged, sqlite);
+      const hasData = profile.data.length > 0 || walk(merged).some((rel) => isData(rel, profile));
       info.set(id, { id, profile, files, fixtures, sqlite, fixturesHash, hasData });
     } catch (e) {
       refuse(id, e);

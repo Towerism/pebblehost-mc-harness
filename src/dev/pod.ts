@@ -75,17 +75,21 @@ function labelArgs(p: Pod): string[] {
 // SQL file) as a new database; a target that is also a fixture file is
 // refused. Returns the fixtures hash: the merged files' hash, extended by
 // each target and its SQL bytes (not the built bytes) when there are any.
-// It builds in a sibling directory and renames that over dest only once
+// It builds in a sibling directory and swaps that in for dest only once
 // complete, so a failed build leaves dest (a running pod's /fixtures, which
-// rebuild replaces only afterwards) as it was.
+// rebuild replaces only afterwards) as it was. dest's parent must be private
+// (callers use a 0700 directory): the siblings have predictable names.
 export function mergeFixtures(sources: string[], dest: string, sqlite: Record<string, string> = {}): string {
   const next = `${dest}.next`;
-  rmSync(next, { recursive: true, force: true });
-  mkdirSync(next, { recursive: true });
+  const old = `${dest}.old`;
+  for (const dir of [next, old]) rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dirname(next), { recursive: true });
+  mkdirSync(next);
   try {
     const h = buildFixtures(sources, next, sqlite);
-    rmSync(dest, { recursive: true, force: true });
+    if (existsSync(dest)) renameSync(dest, old);
     renameSync(next, dest);
+    rmSync(old, { recursive: true, force: true });
     return h;
   } catch (e) {
     rmSync(next, { recursive: true, force: true });
