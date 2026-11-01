@@ -107,3 +107,10 @@ test("the private path guard refuses server paths the repo's sync-rules mark ski
   write(root, { 'sync-rules': 'nonsense\n' });
   assert.match(guard('private').stderr, /sync-rules:1: expected/);
 });
+
+test("the template's .gitignore carries the section bin/dev sync generates from the default rules", () => {
+  const dir = tmp();
+  write(dir, { '.gitignore': readFileSync(join(HARNESS_ROOT, 'template', '.gitignore'), 'utf8') });
+  assert.ok(readFileSync(join(dir, '.gitignore'), 'utf8').includes(gitignoreSection(readRules(tmp()))));
+  assert.equal(writeGitignore(join(dir, '.gitignore'), readRules(tmp())), false);
+});

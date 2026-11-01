@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail } from '../dev/docker.ts';
-import { HARNESS_ROOT, labels, privateDir } from '../dev/image.ts';
+import { git, HARNESS_ROOT, labels, privateDir } from '../dev/image.ts';
 import { isExplored, killOrphanSuite, names, podOf, RUN_LOG, state, suitePidFile } from '../dev/pod.ts';
 import { parseBareText } from '../gate/bareText.ts';
 import { writeDoc } from '../gate/docs.ts';
@@ -102,6 +102,28 @@ function bareTextOf(root: string, id: string): { staticProblems: string[]; bareF
     bareFiles.push(...files);
   }
   return { staticProblems, bareFiles: [...new Set(bareFiles)] };
+}
+
+// A gate pass of check id whose confirm run is committed as is: what
+// postmortem, runbook and runbook push need (G1-G10 and the confirm).
+function confirmedPass(root: string, cmd: string, id: string, issue: number): { v: Verdict & { kind: Kind } & { ok: true }; confirm: RunRecord; records: RunRecord[] } {
+  const records = readRecords(root, issue);
+  const v = verdict(root, id, issue, records);
+  if (!v.ok) fail(`${cmd}: the gate refuses ${id}:\n  ${v.reasons.join('\n  ')}`);
+  const { confirm, why } = confirmCheck(records, v.green);
+  if (!confirm) fail(`${cmd}: the green of ${id} is not confirmed (${why}); run bin/dev rebuild, then bin/check gate ${id}`);
+  if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
+  return { v, confirm, records };
+}
+
+// runbook push N: the project is on issue/N and every committed check of the
+// issue (checks/N-*) holds a confirmed, committed gate pass.
+function gatedIssue(root: string, n: number): void {
+  const head = git(root, ['symbolic-ref', '--short', '-q', 'HEAD']).stdout.trim();
+  if (head !== `issue/${n}`) fail(`runbook push ${n}: check out issue/${n} first (on ${head || 'a detached HEAD'}); the gate reads its records there`);
+  const ids = git(root, ['ls-tree', '-d', '--name-only', 'HEAD', 'checks/']).stdout.split('\n').map((l) => l.slice('checks/'.length)).filter((id) => id.startsWith(`${n}-`));
+  if (ids.length === 0) fail(`runbook push ${n}: issue/${n} has no committed checks/${n}-*; a push needs a gate pass`);
+  for (const id of ids) confirmedPass(root, `runbook push ${n}`, id, n);
 }
 
 function verdict(root: string, id: string, issue: number, records: RunRecord[]): Verdict & { kind: Kind } {
@@ -204,7 +226,7 @@ function main(argv: string[]) {
   if (o.sub) {
     const n = Number(o.id);
     if (!Number.isInteger(n) || n <= 0) fail(`runbook ${o.sub} needs an issue number\n${USAGE}`);
-    if (o.sub === 'push') runbookPush(root, n, o.plan);
+    if (o.sub === 'push') runbookPush(root, n, o.plan, () => gatedIssue(root, n));
     else say(runbookRollback(root, n).join('\n'));
     return;
   }
@@ -257,12 +279,7 @@ function main(argv: string[]) {
     }
     case 'postmortem':
     case 'runbook': {
-      const records = readRecords(root, issue);
-      const v = verdict(root, o.id, issue, records);
-      if (!v.ok) fail(`${cmd}: the gate refuses ${o.id}:\n  ${v.reasons.join('\n  ')}`);
-      const { confirm, why } = confirmCheck(records, v.green);
-      if (!confirm) fail(`${cmd}: the green of ${o.id} is not confirmed (${why}); run bin/dev rebuild, then bin/check gate ${o.id}`);
-      if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${o.id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
+      const { v, confirm, records } = confirmedPass(root, cmd, o.id, issue);
       const live = records.filter((r) => r.check === o.id && r.target === 'live').at(-1);
       say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm, live)}`);
       break;

@@ -1,7 +1,9 @@
 // bin/check runbook push N and rollback N: put issue/N's server/ changes on
 // live, guarded. The push set is the server/** paths of main...issue/N with
 // the prefix stripped; every other path is "not pushed", and a deleted file
-// is a manual step (bin/mc never deletes). Before anything is written, each
+// is a manual step (bin/mc never deletes). It needs the committed runbook and
+// a confirmed gate pass on issue/N, and refuses skip and data paths of
+// sync-rules. Before anything is written, each
 // file is pulled into the persistent .dev/runbook-N/home and must still be
 // main's version: drift on main or on live since issue/N was cut refuses the
 // push. Then each one goes up with MC_RUNBOOK=1 (bin/mc refuses a bare push
@@ -13,6 +15,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSyn
 import { dirname, isAbsolute, join } from 'node:path';
 import { fail } from '../dev/docker.ts';
 import { git, HARNESS_ROOT, privateDir } from '../dev/image.ts';
+import { matchRule, readRules } from './rules.ts';
 import { envFile, mc } from './sync.ts';
 
 const say = (msg: string) => process.stdout.write(`${msg}\n`);
@@ -131,15 +134,24 @@ function requireRunbook(root: string, n: number): void {
   if (!docs.some((f) => new RegExp(`^docs/runbooks/\\d{4}-\\d{2}-\\d{2}-${n}-`).test(f))) fail(`issue/${n} has no committed docs/runbooks/<date>-${n}-<slug>.md: pass the gate, run bin/check runbook <id>, commit it, then push`);
 }
 
-export function runbookPush(root: string, n: number, plan: boolean): void {
+export function runbookPush(root: string, n: number, plan: boolean, requireGate: () => void): void {
   const set = pushSet(root, n);
+  // skip and data paths never reach live, whatever the branch holds.
+  const rules = readRules(root);
+  for (const p of [...set.changed, ...set.added]) {
+    const r = matchRule(rules, p);
+    if (r) fail(`sync-rules ${r.cls} ${r.pattern} covers server/${p}; it is never pushed: take it out of issue/${n}`);
+  }
   for (const p of set.notPushed) say(`not pushed: ${p}`);
   for (const p of set.deleted) say(`manual: delete server/${p} on live by hand (the push never deletes)`);
   if (set.changed.length + set.added.length === 0) {
     say(`runbook: nothing under server/ to push for issue/${n}`);
     return;
   }
-  if (!plan) requireRunbook(root, n);
+  if (!plan) {
+    requireRunbook(root, n);
+    requireGate();
+  }
   const dir = privateDir(runDir(root, n));
   const home = privateDir(join(dir, 'home'));
   const { units, diffs } = prepare(root, n, set, home);

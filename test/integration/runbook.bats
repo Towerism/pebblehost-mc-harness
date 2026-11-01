@@ -1,7 +1,9 @@
 # bin/check runbook push and rollback against the shared SFTP container as
 # live: its root (/home/mc) holds a small server tree, reset before each
 # test, and a temp private-shaped project has main mirroring it and issue/9
-# changing it. Sorts after mc.bats, whose root push must see only its tree.
+# changing it. Each push runs after a real bare-text gate pass on issue/9
+# (red, fix commit, green, gate with its confirm, the runbook), all offline.
+# Sorts after mc.bats, whose root push must see only its tree.
 
 setup() {
   export RCLONE_LOW_LEVEL_RETRIES=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
@@ -19,6 +21,7 @@ PEBBLE_SFTP_USER=mc
 PEBBLE_PANEL_PASSWORD='$SFTP_PASSWORD'
 ENV
   printf '.env\n.dev/\n' >"$MC_HOME/.gitignore"
+  echo '{"type":"module"}' >"$MC_HOME/package.json"
   mkdir -p "$MC_HOME/server/plugins/Eco" "$MC_HOME/server/plugins/Other"
   printf 'rate: 1\n' >"$MC_HOME/server/plugins/Eco/config.yml"
   printf 'a: 1\n' >"$MC_HOME/server/plugins/Eco/a.yml"
@@ -28,8 +31,13 @@ ENV
   git -C "$MC_HOME" add -A
   git -C "$MC_HOME" commit -q -m 'live drift: 5 files'
   git -C "$MC_HOME" switch -q -c issue/9
-  mkdir -p "$MC_HOME/docs/runbooks"
-  echo runbook >"$MC_HOME/docs/runbooks/2026-11-01-9-eco.md"
+  # The check, then its red on the unfixed tree.
+  mkdir -p "$MC_HOME/checks/9-eco"
+  echo '{"kind":"bare-text"}' >"$MC_HOME/checks/9-eco/profile.json"
+  printf "import { test, bareText } from '#harness/unit';\ntest('rate', () => bareText('plugins/Eco/config.yml', 'rate', '2'));\n" >"$MC_HOME/checks/9-eco/rate.test.ts"
+  issue_commit 'check'
+  run "$check" run 9-eco </dev/null
+  [ "$status" -eq 1 ]
 }
 
 live() { docker exec -u "$SFTP_UID" -w /home/mc "$SFTP_CONTAINER" sh -c "$1"; }
@@ -38,17 +46,28 @@ live_reset() {
 }
 issue_commit() { git -C "$MC_HOME" add -A && git -C "$MC_HOME" commit -q -m "$1"; }
 
+# Commit the test's server edits as the fix and take it through the gate:
+# green, records, gate and its confirm, the runbook, each committed.
+gate_issue() {
+  issue_commit fix
+  "$check" run 9-eco </dev/null
+  issue_commit 'records'
+  "$check" gate 9-eco </dev/null
+  issue_commit 'confirm'
+  "$check" runbook 9-eco </dev/null
+  issue_commit 'runbook'
+}
+
 @test "push uploads only issue/N's server/ files, new ones included, with backups and a journal; rollback's commands restore live" {
   printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
-  mkdir -p "$MC_HOME/server/plugins/Eco/lang" "$MC_HOME/checks/9-eco"
+  mkdir -p "$MC_HOME/server/plugins/Eco/lang"
   printf 'hi: x\n' >"$MC_HOME/server/plugins/Eco/lang/en.yml"
-  echo '{"kind":"e2e"}' >"$MC_HOME/checks/9-eco/profile.json"
   git -C "$MC_HOME" rm -q server/plugins/Eco/old.yml
-  issue_commit 'fix'
+  gate_issue
   run "$check" runbook push 9 --plan </dev/null
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *"not pushed: checks/9-eco/profile.json"* && $output == *"not pushed: docs/runbooks/2026-11-01-9-eco.md"* ]]
+  [[ $output == *"not pushed: checks/9-eco/profile.json"* && $output == *"not pushed: docs/runbooks/"*"-9-eco.md"* && $output == *"not pushed: .verify/runs/issue-9.jsonl"* ]]
   [[ $output == *"manual: delete server/plugins/Eco/old.yml on live by hand"* ]]
   [[ $output == *"+rate: 2"* && $output == *"+hi: x"* ]]
   [ "$(live 'cat plugins/Eco/config.yml')" = 'rate: 1' ]
@@ -78,7 +97,7 @@ issue_commit() { git -C "$MC_HOME" add -A && git -C "$MC_HOME" commit -q -m "$1"
 
 @test "push refuses drift on main or on live since the cut, before writing anything" {
   printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
-  issue_commit 'fix'
+  gate_issue
   live 'printf "rate: live\n" >plugins/Eco/config.yml'
   run "$check" runbook push 9 </dev/null
   echo "$output"
@@ -101,7 +120,7 @@ issue_commit() { git -C "$MC_HOME" add -A && git -C "$MC_HOME" commit -q -m "$1"
   printf 'a: 2\n' >"$MC_HOME/server/plugins/Eco/a.yml"
   printf 'b: 2\n' >"$MC_HOME/server/plugins/Eco/b.yml"
   printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
-  issue_commit 'fix'
+  gate_issue
   # b.yml readable but not writable by the SFTP user.
   docker exec "$SFTP_CONTAINER" sh -c 'chown root /home/mc/plugins/Eco/b.yml && chmod 644 /home/mc/plugins/Eco/b.yml'
   run "$check" runbook push 9 </dev/null

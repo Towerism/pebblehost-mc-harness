@@ -37,9 +37,9 @@ test('drift is a main change since the cut to a path of the set, matched literal
   assert.deepEqual(mainDrift(root, 9, []), []);
 });
 
-test('runbook push and rollback refuse before any transfer: no number, no branch, drift, no committed runbook, no journal', () => {
+test('runbook push and rollback refuse before any transfer: no number, no branch, a sync-rules path, no runbook, no gate pass, drift, no journal', () => {
   const root = repo();
-  commit(root, { 'server/config.yml': 'a: 2\n' });
+  commit(root, { 'server/config.yml': 'a: 2\n', 'server/plugins/Eco/data.db': 'db' });
   const run = (...args: string[]) => check(root, {}, 'runbook', ...args);
   let r = run('push');
   assert.equal(r.status, 2);
@@ -47,13 +47,28 @@ test('runbook push and rollback refuse before any transfer: no number, no branch
   r = run('push', '4');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /no issue\/4 branch/);
+  r = run('push', '9', '--plan');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /sync-rules data \*\.db covers server\/plugins\/Eco\/data\.db; it is never pushed/);
+  git(root, 'rm', '-q', 'server/plugins/Eco/data.db');
+  git(root, 'commit', '-q', '-m', 'no db');
   r = run('push', '9');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /issue\/9 has no committed docs\/runbooks\/<date>-9-<slug>\.md/);
   commit(root, { 'docs/runbooks/2026-11-01-9-x.md': 'r\n' });
-  git(root, 'switch', '-q', 'main');
-  commit(root, { 'server/config.yml': 'a: live\n' });
   r = run('push', '9');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /runbook push 9: issue\/9 has no committed checks\/9-\*; a push needs a gate pass/);
+  commit(root, { 'checks/9-x/profile.json': '{"kind":"bare-text"}\n', 'checks/9-x/a.test.ts': "import { test, bareText } from '#harness/unit';\ntest('a', () => bareText('config.yml', 'a', '2'));\n" });
+  r = run('push', '9');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /runbook push 9: the gate refuses 9-x:/);
+  git(root, 'switch', '-q', 'main');
+  r = run('push', '9');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /runbook push 9: check out issue\/9 first \(on main\)/);
+  commit(root, { 'server/config.yml': 'a: live\n' });
+  r = run('push', '9', '--plan');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /main changed config\.yml after issue\/9 was cut/);
   r = run('rollback', '9');
