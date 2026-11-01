@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { readRecords } from '../../src/check/record.ts';
-import { check, commit, E2E, project, write } from './project.ts';
+import { spawnSync } from 'node:child_process';
+import { check, commit, E2E, ENV, git, project, write } from './project.ts';
 
 test('a check sees only an allow-listed env: NODE_OPTIONS cannot preload code that neuters asserts', () => {
   const root = project({ ...E2E, 'checks/3-motd/a.test.ts': "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails', () => assert.equal(process.env.SNEAKY ?? 'unset', 'set'));\n" });
@@ -39,4 +40,29 @@ test('bareText reads the committed file: an ignored or untracked server file nev
   const r = check(root, {}, 'run', '3-data');
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /server\/data\/d\.yml is not tracked at [0-9a-f]{12}/);
+});
+
+test('only committed files of a check run: an ignored or untracked file in checks/<id> refuses the run', () => {
+  for (const kind of ['e2e', 'bare-text']) {
+    const t = kind === 'e2e' ? "import { test } from 'node:test';\ntest('ok', () => {});\n" : "import { test, bareText } from '#harness/unit';\ntest('name', () => bareText('config.yml', 'crate.name', 'Vote Crate'));\n";
+    const root = project({ '.gitignore': '.dev/\nchecks/3-x/zz.test.ts\n', 'checks/3-x/profile.json': `{"kind":"${kind}"}\n`, 'checks/3-x/a.test.ts': t });
+    write(root, { 'checks/3-x/zz.test.ts': "import { test } from 'node:test';\ntest('hidden', () => { throw new Error('fake red'); });\n" });
+    let r = check(root, {}, 'run', '3-x');
+    assert.equal(r.status, 2, `${kind}: ${r.stdout}`);
+    assert.match(r.stderr, /checks\/3-x holds untracked or ignored files; remove them or commit them:\nchecks\/3-x\/zz\.test\.ts/);
+    write(root, { '.gitignore': '.dev/\n' });
+    commit(root, {});
+    r = check(root, {}, 'run', '3-x');
+    assert.equal(r.status, 1, `${kind} committed: the hidden test now runs and fails openly`);
+    assert.deepEqual(readRecords(root, 3).map((x) => x.pass), [false]);
+  }
+});
+
+test('bareText ignores replace refs: a replaced blob never makes a red pass', () => {
+  const root = project({ 'checks/3-crate/profile.json': '{"kind":"bare-text"}\n', 'checks/3-crate/crate.test.ts': "import { test, bareText } from '#harness/unit';\ntest('name', () => bareText('config.yml', 'crate.name', 'Fixed'));\n" });
+  const good = spawnSync('git', ['-C', root, 'hash-object', '-w', '--stdin'], { input: "crate:\n  name: 'Fixed'\n", encoding: 'utf8', env: ENV }).stdout.trim();
+  git(root, 'replace', git(root, 'rev-parse', 'HEAD:server/config.yml').stdout.trim(), good);
+  assert.match(git(root, 'show', 'HEAD:server/config.yml').stdout, /Fixed/);
+  const r = check(root, {}, 'run', '3-crate');
+  assert.equal(r.status, 1, r.stdout + r.stderr);
 });

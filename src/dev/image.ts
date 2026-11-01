@@ -101,11 +101,15 @@ export function treeHash(src: Source): string {
   return src.kind === 'git' ? mustGit(src.root, ['rev-parse', `${src.commit}:server`]) : `dir:${dirHash(join(src.root, 'server'))}`;
 }
 
-// Uncommitted changes to the harness's image or relay inputs, as `git status
-// --porcelain` lines: a pod booted from them would not be what any commit
-// holds, and harnessHash would name code nobody can check out again.
+// The code that runs checks and judges them (bin/check run, the check APIs,
+// the gate): its hash is recorded with every run as toolHash.
+export const CHECK_DIRS = ['src/check', 'src/gate'];
+
+// Uncommitted changes to the harness's image, relay or check code, as `git
+// status --porcelain` lines: a pod or a run from them would not be what any
+// commit holds, and the recorded hashes would name code nobody can check out.
 export function dirtyHarness(harnessRoot = HARNESS_ROOT): string[] {
-  const r = git(harnessRoot, ['status', '--porcelain', '--untracked-files=all', '--', ...HARNESS_INPUTS, ...RELAY_INPUTS]);
+  const r = git(harnessRoot, ['status', '--porcelain', '--untracked-files=all', '--', ...HARNESS_INPUTS, ...RELAY_INPUTS, ...CHECK_DIRS]);
   if (r.status !== 0) fail(`cannot check the harness at ${harnessRoot} for uncommitted changes: ${r.stderr.trim()}`);
   return r.stdout.split('\n').filter(Boolean);
 }
@@ -113,6 +117,20 @@ export function dirtyHarness(harnessRoot = HARNESS_ROOT): string[] {
 export function harnessHash(harnessRoot = HARNESS_ROOT): string {
   const h = createHash('sha256');
   for (const f of HARNESS_INPUTS) h.update(`${f}\n${sha256(readFileSync(join(harnessRoot, f)))}\n`);
+  return h.digest('hex');
+}
+
+export function toolHash(harnessRoot = HARNESS_ROOT): string {
+  const h = createHash('sha256');
+  for (const dir of CHECK_DIRS) {
+    let files: string[];
+    try {
+      files = walk(join(harnessRoot, dir));
+    } catch {
+      continue;
+    }
+    for (const f of files) h.update(`${dir}/${f}\n${sha256(readFileSync(join(harnessRoot, dir, f)))}\n`);
+  }
   return h.digest('hex');
 }
 

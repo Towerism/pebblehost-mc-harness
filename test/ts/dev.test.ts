@@ -8,7 +8,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rea
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DevError, type Docker } from '../../src/dev/docker.ts';
-import { build, buildContext, chooseJar, dirHash, dirtyHarness, HARNESS_INPUTS, RELAY_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
+import { build, buildContext, chooseJar, dirHash, dirtyHarness, toolHash, HARNESS_INPUTS, RELAY_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
 import { applyOverrides, OVERRIDES, setProperty, setYaml } from '../../src/dev/overrides.ts';
 import { bootTimeout, createJoin, createPod, EGRESS_SINKS, formatBootReport, mergeFixtures, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
 
@@ -347,12 +347,16 @@ test('removePod removes the pod by label, containers first; --all drops the pod 
   assert.ok(!calls.some((c) => c[0] === 'image'), 'a plain down keeps the image');
 });
 
-test('dirtyHarness lists uncommitted image and relay inputs only', () => {
-  const files = Object.fromEntries([...HARNESS_INPUTS, ...RELAY_INPUTS, 'README.md'].map((f) => [f, 'x\n']));
+test('dirtyHarness lists uncommitted image, relay and check code only; toolHash follows the check code', () => {
+  const files = Object.fromEntries([...HARNESS_INPUTS, ...RELAY_INPUTS, 'src/check/run.ts', 'src/gate/gate.ts', 'README.md'].map((f) => [f, 'x\n']));
   const root = gitRepo(files);
   assert.deepEqual(dirtyHarness(root), []);
+  const before = toolHash(root);
   write(root, { 'docker/entrypoint.sh': 'y\n', 'src/relay/rcon.ts': 'y\n', 'README.md': 'y\n' });
-  assert.deepEqual(dirtyHarness(root), [' M docker/entrypoint.sh', ' M src/relay/rcon.ts']);
+  assert.equal(toolHash(root), before);
+  write(root, { 'src/gate/gate.ts': 'y\n', 'src/check/new.ts': 'z\n' });
+  assert.deepEqual(dirtyHarness(root), [' M docker/entrypoint.sh', ' M src/gate/gate.ts', ' M src/relay/rcon.ts', '?? src/check/new.ts']);
+  assert.notEqual(toolHash(root), before);
   assert.throws(() => dirtyHarness(tmp()), /cannot check the harness/);
 });
 
