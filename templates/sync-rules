@@ -1,0 +1,24 @@
+# sync-rules: `<class> <pattern>`, one per line. Patterns are gitignore-style
+# and relative to the server root: with a slash before the end they are
+# anchored there, without one they match a name at any depth, and a match
+# includes everything below it.
+#   skip    never transferred, never committed
+#   data    pulled only by bin/dev seed --with-data, never committed
+#   review  proposed by bin/dev inventory; no effect until made skip or data
+# A path no rule matches is synced by bin/dev sync and tracked on main.
+
+# Volatile output and snapshots nobody versions.
+skip plugins/ajLeaderboards/past-resets/
+skip logs/
+skip crash-reports/
+skip spark/tmp/
+skip .trash/
+skip *.partial
+
+# Plugin and player data.
+data *.db
+data *.sqlite
+data *.mv.db
+data *.h2.db
+data userdata/
+data playerdata/
