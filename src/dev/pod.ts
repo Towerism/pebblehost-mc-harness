@@ -2,10 +2,10 @@
 // egress), a named volume at /server and a read-only /fixtures. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
-import { dirHash, walk } from './image.ts';
+import { dirHash, privateDir, walk } from './image.ts';
 
 export const SOCAT_IMAGE = 'alpine/socat@sha256:466c8a0383e16463fabdb7df01008292fb78d07da60224a46cb5d3142ce122ed';
 export const MARKER = '/server/.mc-harness-seeded';
@@ -19,7 +19,7 @@ export function podOf(root: string, pod: string): Pod {
 
 export function names(p: Pod) {
   const prefix = `mc-${p.project}-${p.pod}`;
-  return { net: `${prefix}-net`, vol: `${prefix}-server`, server: `${prefix}-server`, join: `${prefix}-join`, dir: join(p.root, '.dev', 'pods', p.pod) };
+  return { net: `${prefix}-net`, vol: `${prefix}-server`, server: `${prefix}-server`, join: `${prefix}-join`, joinNet: `${prefix}-joinnet`, dir: join(p.root, '.dev', 'pods', p.pod) };
 }
 
 function labelArgs(p: Pod): string[] {
@@ -47,19 +47,33 @@ export function mergeFixtures(sources: string[], dest: string): string {
   return dirHash(dest);
 }
 
-export type Spec = { tag: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string };
+export type Spec = { tag: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string; memory?: string };
 
 // Network, volume and container. No published port: bin/dev join adds a proxy.
+// The RCON password reaches docker through its environment, never argv.
 export function createPod(p: Pod, s: Spec, d: Docker): void {
   const n = names(p);
-  must(d, ['network', 'create', '--internal', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labelArgs(p), n.net]);
+  must(d, ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labelArgs(p), n.net]);
   must(d, ['volume', 'create', ...labelArgs(p), n.vol]);
   const run = ['run', '-d', '--name', n.server, '--hostname', `mc-${p.pod}`, '--network', n.net, ...labelArgs(p)];
   run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`);
-  run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', `RCON_PASSWORD=${s.rconPassword}`);
+  run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', 'RCON_PASSWORD');
   if (s.javaOpts) run.push('-e', `JAVA_OPTS=${s.javaOpts}`);
-  run.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--stop-timeout', '60', s.tag);
-  must(d, run);
+  if (s.memory) run.push('--memory', s.memory);
+  run.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '4096', '--stop-timeout', '60', s.tag);
+  must(d, run, { RCON_PASSWORD: s.rconPassword });
+}
+
+// A socat proxy publishing 127.0.0.1:port to the server: on its own labelled
+// network (internal networks can't publish), then joined to the pod's.
+export function createJoin(p: Pod, port: number, image: string, d: Docker): void {
+  const n = names(p);
+  must(d, ['network', 'create', '--ipv6=false', ...labelArgs(p), n.joinNet]);
+  const run = ['create', '--name', n.join, '--network', n.joinNet, ...labelArgs(p), '-p', `127.0.0.1:${port}:25565`];
+  run.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '65534:65534', '--read-only', '--pids-limit', '256');
+  must(d, [...run, image, 'TCP-LISTEN:25565,fork,reuseaddr', `TCP:${n.server}:25565`]);
+  must(d, ['network', 'connect', n.net, n.join]);
+  must(d, ['start', n.join]);
 }
 
 function ids(d: Docker, kind: 'container' | 'volume' | 'network', filters: string[]): string[] {
@@ -68,8 +82,9 @@ function ids(d: Docker, kind: 'container' | 'volume' | 'network', filters: strin
   return must(d, args).split('\n').filter(Boolean);
 }
 
-// Remove every container, volume and network of the pod (or, with pod null,
-// of every pod of the project). Containers first: they hold the others.
+// Remove every container, volume and network of the pod (with all, of every
+// pod of the project, and its mc-dev images too). Containers first: they hold
+// the others. A plain down keeps the image as the build cache.
 export function removePod(p: Pod, all: boolean, d: Docker): number {
   const filters = [`mc-harness.project=${p.project}`, ...(all ? [] : [`mc-harness.pod=${p.pod}`])];
   let n = 0;
@@ -78,6 +93,11 @@ export function removePod(p: Pod, all: boolean, d: Docker): number {
     if (list.length === 0) continue;
     must(d, kind === 'container' ? ['rm', '-f', ...list] : [kind, 'rm', ...list]);
     n += list.length;
+  }
+  if (all) {
+    const imgs = must(d, ['image', 'ls', '-q', '--filter', `label=mc-harness.project=${p.project}`]).split('\n').filter(Boolean);
+    if (imgs.length > 0) must(d, ['image', 'rm', '-f', ...new Set(imgs)]);
+    n += new Set(imgs).size;
   }
   return n;
 }
@@ -100,9 +120,10 @@ export function waitDone(p: Pod, d: Docker, since: number, timeoutS: number): nu
     if (m) return Number(m[1].replace(',', '.'));
     const st = state(d, n.server);
     if (st !== 'running' || Date.now() > deadline) {
-      mkdirSync(n.dir, { recursive: true });
+      privateDir(n.dir);
       const saved = join(n.dir, `latest-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
       const cp = d(['cp', `${n.server}:/server/logs/latest.log`, saved]);
+      if (cp.status === 0) chmodSync(saved, 0o600);
       const tail = (log.stdout + log.stderr).trim().split('\n').slice(-15).join('\n');
       fail(`${st === 'running' ? `no "Done" within ${timeoutS}s` : `server ${st ?? 'missing'}`}${cp.status === 0 ? `; log saved to ${saved}` : ''}\n${tail}`);
     }

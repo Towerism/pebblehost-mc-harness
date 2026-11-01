@@ -3,13 +3,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DevError, type Docker } from '../../src/dev/docker.ts';
-import { buildContext, dirHash, HARNESS_INPUTS, HARNESS_ROOT, identity, source, stepCached } from '../../src/dev/image.ts';
+import { build, buildContext, dirHash, HARNESS_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
 import { applyOverrides, setProperty } from '../../src/dev/overrides.ts';
-import { createPod, mergeFixtures, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
+import { createJoin, createPod, mergeFixtures, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dev-test-'));
 
@@ -38,15 +38,19 @@ function commitAll(root: string, files: Record<string, string>) {
   spawnSync('git', ['-C', root, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '-m', 'change'], { env });
 }
 
-// A docker stand-in that records argv and answers from a table of prefixes.
-function recorder(answers: Record<string, string> = {}): { d: Docker; calls: string[][] } {
+// A docker stand-in that records argv and env, and answers from a table of
+// prefixes: stdout, or { status } for a failing call.
+function recorder(answers: Record<string, string | { status: number }> = {}): { d: Docker; calls: string[][]; envs: (Record<string, string> | undefined)[] } {
   const calls: string[][] = [];
-  const d: Docker = (args) => {
+  const envs: (Record<string, string> | undefined)[] = [];
+  const d: Docker = (args, opts) => {
     calls.push(args);
+    envs.push(opts?.env);
     const key = Object.keys(answers).find((k) => args.join(' ').startsWith(k));
-    return { status: 0, stdout: key ? answers[key] : '', stderr: '' };
+    const a = key === undefined ? '' : answers[key];
+    return typeof a === 'string' ? { status: 0, stdout: a, stderr: '' } : { status: a.status, stdout: '', stderr: 'no such object' };
   };
-  return { d, calls };
+  return { d, calls, envs };
 }
 
 test('setProperty rewrites only the key, keeping comments and other lines', () => {
@@ -101,13 +105,15 @@ test('a harness input change moves imageHash but not treeHash', () => {
   assert.notEqual(after.image, before.image);
 });
 
-test('an untracked server/ is a plain directory: commit none, content-hashed, symlinks refused', () => {
+test('an untracked server/ is a plain directory: source dir, no commit, dir: tree hash, symlinks refused', () => {
   const root = tmp();
   write(root, { 'server/a.txt': 'a' });
   const src = source(root);
   assert.equal(src.kind, 'dir');
   const id = identity(src);
-  assert.equal(id.commit, 'none');
+  assert.equal(id.source, 'dir');
+  assert.equal(id.commit, '');
+  assert.match(id.tree, /^dir:[0-9a-f]{64}$/);
   write(root, { 'server/a.txt': 'b' });
   assert.notEqual(identity(src).tree, id.tree);
   symlinkSync('/etc/passwd', join(root, 'server/link'));
@@ -155,22 +161,75 @@ test('stepCached reads classic and BuildKit output', () => {
   assert.ok(!stepCached('#7 [3/6] COPY --chown=1000:1000 bin /server/\n#7 DONE 1.2s\n#8 CACHED\n', step));
 });
 
-test('createPod: internal network without a gateway, labelled volume, no published port', () => {
+test('build labels an archive image with its commit and source=archive', () => {
+  const root = gitRepo({ 'server/a.jar': '1' });
+  const { d, calls } = recorder({ 'image inspect': { status: 1 } });
+  const built = build(source(root), d, 'proj1234');
+  const args = calls.find((c) => c[0] === 'build') ?? [];
+  assert.ok(args.includes('mc-harness.source=archive'));
+  assert.equal(built.id.commit.length, 40);
+  for (const k of ['commit', 'tree', 'harness', 'image'] as const) assert.ok(args.includes(`mc-harness.${k}=${built.id[k]}`), k);
+  assert.ok(args.includes('mc-harness.project=proj1234'));
+});
+
+test('build labels a plain-copy image source=dir with an empty commit and a dir: tree', () => {
+  const root = tmp();
+  write(root, { 'server/a.jar': '1' });
+  const { d, calls } = recorder({ 'image inspect': { status: 1 } });
+  build(source(root), d, 'proj1234');
+  const args = calls.find((c) => c[0] === 'build') ?? [];
+  assert.ok(args.includes('mc-harness.source=dir'));
+  assert.ok(args.includes('mc-harness.commit='));
+  assert.ok(args.some((a) => /^mc-harness\.tree=dir:[0-9a-f]{64}$/.test(a)));
+  // .dev is owner-only, and the build context is gone after the build.
+  assert.equal(statSync(join(root, '.dev')).mode & 0o777, 0o700);
+  assert.deepEqual(readdirSync(join(root, '.dev')), []);
+});
+
+test('pruneImages keeps the new image and images a container uses', () => {
+  const { d, calls } = recorder({
+    'ps -a': 'mc-dev:inuse\n',
+    'image ls': 'mc-dev:new id1\nmc-dev:inuse id2\nmc-dev:old id3\nother:tag id4\n',
+  });
+  assert.equal(pruneImages(d, 'proj1234', ['mc-dev:new']), 1);
+  assert.deepEqual(calls[2], ['image', 'rm', '-f', 'mc-dev:old']);
+  assert.ok(calls[1].includes('label=mc-harness.project=proj1234'));
+});
+
+test('createPod: internal IPv4-only network without a gateway, labelled volume, no published port', () => {
   const p = podOf(tmp(), 'dev');
-  const { d, calls } = recorder();
+  const { d, calls, envs } = recorder();
   createPod(p, { tag: 'mc-dev:abc', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw' }, d);
   const labels = ['--label', `mc-harness.project=${p.project}`, '--label', 'mc-harness.pod=dev'];
   const prefix = `mc-${p.project}-dev`;
-  assert.deepEqual(calls[0], ['network', 'create', '--internal', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labels, `${prefix}-net`]);
+  assert.deepEqual(calls[0], ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labels, `${prefix}-net`]);
   assert.deepEqual(calls[1], ['volume', 'create', ...labels, `${prefix}-server`]);
   const run = calls[2];
   assert.deepEqual(run.slice(0, 8), ['run', '-d', '--name', `${prefix}-server`, '--hostname', 'mc-dev', '--network', `${prefix}-net`]);
-  for (const pair of [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD=pw'], ['--cap-drop', 'ALL']]) {
-    assert.ok(run.join('\0').includes(pair.join('\0')), pair.join(' '));
-  }
-  assert.ok(!run.some((a) => a === '-p' || a.startsWith('--publish') || a === '-P'));
+  const pairs = [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '4096']];
+  for (const pair of pairs) assert.ok(run.join('\0').includes(pair.join('\0')), pair.join(' '));
+  assert.ok(!run.some((a) => a === '-p' || a.startsWith('--publish') || a === '-P' || a === '--memory'));
+  assert.ok(!run.some((a) => a.startsWith('RCON_PASSWORD=') || a.includes('pw')), 'RCON password in argv');
+  assert.deepEqual(envs[2], { RCON_PASSWORD: 'pw' });
   assert.equal(run[run.length - 1], 'mc-dev:abc');
   assert.equal(calls.length, 3);
+  const mem = recorder();
+  createPod(p, { tag: 'mc-dev:abc', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', memory: '6g' }, mem.d);
+  assert.ok(mem.calls[2].join('\0').includes(['--memory', '6g'].join('\0')));
+});
+
+test('createJoin: own labelled network, locked-down socat, 127.0.0.1 only, then joined to the pod network', () => {
+  const p = podOf(tmp(), 'dev');
+  const { d, calls } = recorder();
+  createJoin(p, 25599, 'socat@sha256:x', d);
+  const prefix = `mc-${p.project}-dev`;
+  const labels = ['--label', `mc-harness.project=${p.project}`, '--label', 'mc-harness.pod=dev'];
+  assert.deepEqual(calls[0], ['network', 'create', '--ipv6=false', ...labels, `${prefix}-joinnet`]);
+  const create = calls[1].join(' ');
+  for (const part of [`--network ${prefix}-joinnet`, '-p 127.0.0.1:25599:25565', '--cap-drop ALL', '--security-opt no-new-privileges', '--user 65534:65534', '--read-only', `TCP:${prefix}-server:25565`]) {
+    assert.ok(create.includes(part), part);
+  }
+  assert.deepEqual(calls.slice(2), [['network', 'connect', `${prefix}-net`, `${prefix}-join`], ['start', `${prefix}-join`]]);
 });
 
 test('removePod removes the pod by label, containers first; --all drops the pod filter', () => {
@@ -179,9 +238,11 @@ test('removePod removes the pod by label, containers first; --all drops the pod 
   assert.equal(removePod(p, false, d), 3);
   const filters = ['--filter', `label=mc-harness.project=${p.project}`, '--filter', 'label=mc-harness.pod=dev'];
   assert.deepEqual(calls, [['ps', '-aq', ...filters], ['rm', '-f', 'c1', 'c2'], ['volume', 'ls', '-q', ...filters], ['volume', 'rm', 'v1'], ['network', 'ls', '-q', ...filters]]);
-  const all = recorder();
+  const all = recorder({ 'image ls -q': 'i1\ni1\ni2\n' });
   removePod(p, true, all.d);
   assert.deepEqual(all.calls[0], ['ps', '-aq', '--filter', `label=mc-harness.project=${p.project}`]);
+  assert.deepEqual(all.calls.slice(-2), [['image', 'ls', '-q', '--filter', `label=mc-harness.project=${p.project}`], ['image', 'rm', '-f', 'i1', 'i2']]);
+  assert.ok(!calls.some((c) => c[0] === 'image'), 'a plain down keeps the image');
 });
 
 test('pod names are validated', () => {

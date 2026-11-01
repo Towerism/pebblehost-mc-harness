@@ -5,7 +5,16 @@ set -u
 bad=0
 # Destination 00000000 is a default route.
 if awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route; then echo 'ipv4 default route'; bad=1; else echo 'no ipv4 default route'; fi
-if [[ -r /proc/net/ipv6_route ]] && awk '$1 == "00000000000000000000000000000000" && $2 == "00" && $10 != "lo" { found = 1 } END { exit !found }' /proc/net/ipv6_route; then echo 'ipv6 default route'; bad=1; else echo 'no ipv6 default route'; fi
+# Without an ipv6_route table, IPv6 must be provably off: no ipv6 sysctls
+# (kernel booted with it disabled) or disable_ipv6=1.
+if [[ -r /proc/net/ipv6_route ]]; then
+  if awk '$1 == "00000000000000000000000000000000" && $2 == "00" && $10 != "lo" { found = 1 } END { exit !found }' /proc/net/ipv6_route; then echo 'ipv6 default route'; bad=1; else echo 'no ipv6 default route'; fi
+elif [[ ! -e /proc/sys/net/ipv6 ]] || [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6) == 1 ]]; then
+  echo 'ipv6 disabled'
+else
+  echo 'ipv6 state unknown: no route table but not disabled'
+  bad=1
+fi
 if timeout 5 bash -c '</dev/tcp/1.1.1.1/443' 2>/dev/null; then echo 'tcp 1.1.1.1:443 reachable'; bad=1; else echo 'tcp 1.1.1.1:443 unreachable'; fi
 if timeout 10 getent hosts example.com >/dev/null; then echo 'example.com resolves'; bad=1; else echo 'example.com does not resolve'; fi
 # 8192 is 2000 in hex; state 0A is LISTEN.

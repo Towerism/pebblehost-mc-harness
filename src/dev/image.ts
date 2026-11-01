@@ -3,7 +3,7 @@
 // with the identity a run record reads back from the running container.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
 import { applyOverrides } from './overrides.ts';
@@ -13,7 +13,10 @@ export const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
 export const HARNESS_INPUTS = ['docker/server.Dockerfile', 'docker/entrypoint.sh', 'src/dev/overrides.ts'];
 
 export type Source = { kind: 'git'; root: string; commit: string } | { kind: 'dir'; root: string };
-export type Identity = { commit: string; tree: string; harness: string; image: string };
+// source=archive images come from a commit; source=dir images from a plain
+// copy, with an empty commit and a tree hash prefixed dir: so it can never
+// pass for a git tree. Only archive builds can count for the red/green gate.
+export type Identity = { source: 'archive' | 'dir'; commit: string; tree: string; harness: string; image: string };
 
 const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
 
@@ -73,7 +76,7 @@ export function dirtyServer(src: Source): string[] {
 }
 
 export function treeHash(src: Source): string {
-  return src.kind === 'git' ? mustGit(src.root, ['rev-parse', `${src.commit}:server`]) : dirHash(join(src.root, 'server'));
+  return src.kind === 'git' ? mustGit(src.root, ['rev-parse', `${src.commit}:server`]) : `dir:${dirHash(join(src.root, 'server'))}`;
 }
 
 export function harnessHash(harnessRoot = HARNESS_ROOT): string {
@@ -85,7 +88,8 @@ export function harnessHash(harnessRoot = HARNESS_ROOT): string {
 export function identity(src: Source, harnessRoot = HARNESS_ROOT): Identity {
   const tree = treeHash(src);
   const harness = harnessHash(harnessRoot);
-  return { commit: src.kind === 'git' ? src.commit : 'none', tree, harness, image: sha256(`${tree}\n${harness}`) };
+  const git = src.kind === 'git';
+  return { source: git ? 'archive' : 'dir', commit: git ? src.commit : '', tree, harness, image: sha256(`${tree}\n${harness}`) };
 }
 
 // Big, rarely changing files go to the first layer so a config-only change
@@ -149,11 +153,10 @@ export function build(src: Source, d: Docker, project: string, harnessRoot = HAR
   const id = identity(src, harnessRoot);
   const tag = `mc-dev:${id.image}`;
   if (d(['image', 'inspect', tag]).status === 0) return { tag, id, cacheHit: true, jarLayerCached: true, notes: [] };
-  mkdirSync(join(src.root, '.dev'), { recursive: true });
-  const ctx = mkdtempSync(join(src.root, '.dev', 'build-'));
+  const ctx = mkdtempSync(join(privateDir(join(src.root, '.dev')), 'build-'));
   try {
     const { jar, notes } = buildContext(src, ctx, harnessRoot);
-    const labels = { commit: id.commit, tree: id.tree, harness: id.harness, image: id.image, project };
+    const labels = { source: id.source, commit: id.commit, tree: id.tree, harness: id.harness, image: id.image, project };
     const args = ['build', '-f', join(ctx, 'Dockerfile'), '--build-arg', `MC_JAR=${jar}`, '-t', tag];
     for (const [k, v] of Object.entries(labels)) args.push('--label', `mc-harness.${k}=${v}`);
     const r = d([...args, ctx]);
@@ -162,6 +165,27 @@ export function build(src: Source, d: Docker, project: string, harnessRoot = HAR
   } finally {
     rmSync(ctx, { recursive: true, force: true });
   }
+}
+
+// .dev/ holds merged fixtures and build contexts, which can carry server
+// secrets: owner-only.
+export function privateDir(dir: string): string {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  return dir;
+}
+
+// Remove the project's mc-dev images except `keep` and those a container
+// still uses: they hold server configs and secrets. Returns how many went.
+export function pruneImages(d: Docker, project: string, keep: string[]): number {
+  const used = new Set(must(d, ['ps', '-a', '--filter', `label=mc-harness.project=${project}`, '--format', '{{.Image}}']).split('\n').filter(Boolean));
+  const imgs = must(d, ['image', 'ls', '--filter', `label=mc-harness.project=${project}`, '--format', '{{.Repository}}:{{.Tag}} {{.ID}}']).split('\n').filter(Boolean);
+  const gone = imgs.filter((l) => {
+    const [ref, id] = l.split(' ');
+    return ref.startsWith('mc-dev:') && !keep.includes(ref) && !used.has(ref) && !used.has(id);
+  });
+  if (gone.length > 0) must(d, ['image', 'rm', '-f', ...gone.map((l) => l.split(' ')[0])]);
+  return gone.length;
 }
 
 // The identity labels of an image or container, as docker inspect reports them.

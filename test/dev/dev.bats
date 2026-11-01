@@ -30,8 +30,12 @@ label() {
   [ "$(docker exec "$SERVER" cat /server/fixture.txt)" = 'from fixtures' ]
   docker exec "$SERVER" grep -qx 'online-mode=false' /server/server.properties
   docker exec "$SERVER" grep -qx 'enable-rcon=true' /server/server.properties
+  [ "$(label source)" = archive ]
   [ "$(label commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
   [ "$(label tree)" = "$(git -C "$MC_HOME" rev-parse HEAD:server)" ]
+  [ "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$SERVER")" = 4096 ]
+  [ "$(stat -c %a "$MC_HOME/.dev")" = 700 ]
+  [ "$(stat -c %a "$MC_HOME/.dev/pods/dev/pod.json")" = 600 ]
 }
 
 @test "the server has no default route, no egress, no DNS and nothing on 8192" {
@@ -39,6 +43,9 @@ label() {
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *"no ipv4 default route"* ]]
+  [[ $output == *"ipv6 disabled"* || $output == *"no ipv6 default route"* ]]
+  [ "$(docker network inspect --format '{{.EnableIPv6}}' "mc-$PROJECT-dev-net")" = false ]
+  [ "$(docker network inspect --format '{{.Internal}}' "mc-$PROJECT-dev-net")" = true ]
   [[ $output == *"tcp 1.1.1.1:443 unreachable"* ]]
   [[ $output == *"example.com does not resolve"* ]]
   [[ $output == *"nothing on 8192"* ]]
@@ -95,6 +102,20 @@ label() {
   [[ $output == *"server/new.txt"* ]]
 }
 
+@test "a rebuild whose build fails leaves the old pod running" {
+  booted=$(label commit)
+  echo 'not a jar' >"$MC_HOME/server/extra.jar"
+  git -C "$MC_HOME" add server
+  git -C "$MC_HOME" commit -q -m 'second root jar'
+  run dev rebuild
+  git -C "$MC_HOME" reset -q --hard HEAD~1
+  [ "$status" -eq 2 ]
+  [[ $output == *"exactly one *.jar"* ]]
+  [ "$(docker inspect --format '{{.State.Status}}' "$SERVER")" = running ]
+  [ "$(label commit)" = "$booted" ]
+  [ "$(docker exec "$SERVER" cat /server/state.txt)" = kept ]
+}
+
 @test "rebuild after a config-only commit reuses the jar layer and relabels" {
   run dev rebuild
   [ "$status" -eq 0 ]
@@ -104,16 +125,22 @@ label() {
   # A new volume: the old state is gone, the fixtures are back.
   run ! docker exec "$SERVER" test -e /server/state.txt
   [ "$(docker exec "$SERVER" cat /server/fixture.txt)" = 'from fixtures' ]
+  # The image of the old commit is pruned; only the running one is left.
+  [ "$(docker image ls -q --filter "label=mc-harness.project=$PROJECT" | sort -u | wc -l)" -eq 1 ]
 }
 
-@test "join proxies localhost to the server, and down removes everything labelled" {
+@test "join proxies localhost through its own locked-down container; down --all removes everything labelled" {
   run dev join --port 25599
   [ "$status" -eq 0 ]
   [ "$(docker port "mc-$PROJECT-dev-join" 25565/tcp)" = '127.0.0.1:25599' ]
   timeout 5 bash -c '</dev/tcp/127.0.0.1/25599'
+  join=mc-$PROJECT-dev-join
+  [ "$(docker inspect --format '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}}' "$join")" = '65534:65534 true [ALL]' ]
+  [ "$(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$join" | tr ' ' '\n' | sort | xargs)" = "mc-$PROJECT-dev-joinnet mc-$PROJECT-dev-net" ]
   run dev down --all
   [ "$status" -eq 0 ]
   [ -z "$(docker ps -aq --filter "label=mc-harness.project=$PROJECT")" ]
   [ -z "$(docker volume ls -q --filter "label=mc-harness.project=$PROJECT")" ]
   [ -z "$(docker network ls -q --filter "label=mc-harness.project=$PROJECT")" ]
+  [ -z "$(docker image ls -q --filter "label=mc-harness.project=$PROJECT")" ]
 }

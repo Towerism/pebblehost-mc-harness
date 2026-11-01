@@ -1,11 +1,11 @@
 // bin/dev: run the server tree as an isolated, offline dev pod.
 // Exit 0 ok, 2 refused or failed. Never prompts.
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail, must } from './docker.ts';
-import { build, dirtyServer, HARNESS_ROOT, labels, source } from './image.ts';
-import { createPod, formatBootReport, mergeFixtures, names, parseBootReport, podOf, readPodFile, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
+import { build, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
+import { createJoin, createPod, formatBootReport, mergeFixtures, names, parseBootReport, podOf, readPodFile, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
 
 const USAGE = `usage: dev <command> [--pod ID] [options]
 
@@ -64,20 +64,27 @@ function requireServer(p: Pod): string {
   return n.server;
 }
 
-// Build, then create the pod and wait for "Done".
-function boot(p: Pod, pf: PodFile, timeout: number) {
+// Build first; only then replace the old pod (rebuild), so a failed build
+// leaves it running. Then create the pod, wait for "Done" and drop the
+// project's images no container uses any more.
+function boot(p: Pod, pf: PodFile, timeout: number, replace: boolean) {
   const src = refuseDirty(p.root);
   const built = build(src, d, p.project);
   say(built.cacheHit ? `image: cache hit ${built.tag}` : `image: built ${built.tag} (jar layer ${built.jarLayerCached ? 'cached' : 'rebuilt'})`);
   for (const note of built.notes) say(`override: ${note}`);
   const n = names(p);
-  mkdirSync(n.dir, { recursive: true });
-  writeFileSync(join(n.dir, 'pod.json'), `${JSON.stringify(pf)}\n`);
+  for (const dir of [join(p.root, '.dev'), join(p.root, '.dev', 'pods'), n.dir]) privateDir(dir);
   const fixturesHash = mergeFixtures(pf.fixtures, join(n.dir, 'fixtures'));
+  if (replace) removePod(p, false, d);
+  writeFileSync(join(n.dir, 'pod.json'), `${JSON.stringify(pf)}\n`, { mode: 0o600 });
+  chmodSync(join(n.dir, 'pod.json'), 0o600);
   const since = Date.now() / 1000;
-  createPod(p, { tag: built.tag, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), javaOpts: process.env.MC_JAVA_OPTS }, d);
+  const spec = { tag: built.tag, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), javaOpts: process.env.MC_JAVA_OPTS, memory: process.env.MC_DEV_MEMORY };
+  createPod(p, spec, d);
   const secs = waitDone(p, d, since, timeout);
-  say(`up: pod ${p.pod} done in ${secs}s (commit ${built.id.commit}, image ${built.id.image.slice(0, 12)})`);
+  const pruned = pruneImages(d, p.project, [built.tag]);
+  const from = built.id.source === 'archive' ? `commit ${built.id.commit}` : 'plain server/ copy, not a commit';
+  say(`up: pod ${p.pod} done in ${secs}s (${from}, image ${built.id.image.slice(0, 12)}${pruned ? `, ${pruned} old image(s) removed` : ''})`);
 }
 
 function main(argv: string[]) {
@@ -92,16 +99,12 @@ function main(argv: string[]) {
         const commit = labels(d, n.server)['mc-harness.commit'];
         fail(`pod ${p.pod} already exists (${st}, commit ${commit}); use bin/dev restart, rebuild or down`);
       }
-      boot(p, { fixtures: o.fixtures }, o.timeout);
+      boot(p, { fixtures: o.fixtures }, o.timeout, false);
       break;
     }
-    case 'rebuild': {
-      refuseDirty(root);
-      const pf = o.fixtures.length > 0 ? { fixtures: o.fixtures } : readPodFile(p);
-      removePod(p, false, d);
-      boot(p, pf, o.timeout);
+    case 'rebuild':
+      boot(p, o.fixtures.length > 0 ? { fixtures: o.fixtures } : readPodFile(p), o.timeout, true);
       break;
-    }
     case 'restart':
     case 'reset': {
       const server = requireServer(p);
@@ -130,15 +133,13 @@ function main(argv: string[]) {
     case 'join': {
       if (o.stop) {
         d(['rm', '-f', n.join]);
+        d(['network', 'rm', n.joinNet]);
         say('join: proxy stopped');
         break;
       }
       requireServer(p);
       if (state(d, n.join) !== null) fail(`join proxy already running; bin/dev join --stop first`);
-      const labelArgs = ['--label', `mc-harness.project=${p.project}`, '--label', `mc-harness.pod=${p.pod}`];
-      must(d, ['create', '--name', n.join, ...labelArgs, '-p', `127.0.0.1:${o.port}:25565`, SOCAT_IMAGE, 'TCP-LISTEN:25565,fork,reuseaddr', `TCP:${n.server}:25565`]);
-      must(d, ['network', 'connect', n.net, n.join]);
-      must(d, ['start', n.join]);
+      createJoin(p, o.port, SOCAT_IMAGE, d);
       say(`join: connect to 127.0.0.1:${o.port}`);
       break;
     }
