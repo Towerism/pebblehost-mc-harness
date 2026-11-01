@@ -64,6 +64,15 @@ The bare-text loop needs no pod and no `--fresh`: `bin/check run <id>` (red), co
 
 `--target live` (for `bin/check run` and `bin/check suite`) runs the same checks read-only against the live server: `dev.file`, `dev.logSince` (the whole current `logs/latest.log`), `dev.sqlite` and `bareText` read through `bin/mc pull` into a throwaway `.dev/live/run-*` home (`MC_ENV_FILE`, else the project's `.env`, which only `bin/mc` reads), and the console, restarts and bots are refused. A test that hits them is skipped when the check's `profile.json` declares it (`needs: ["console"]` or `["bot"]`; a restart by `"restart": true`, `"exclusive": true` or the console need), and fails otherwise. The live target pulls only the exact paths a check reads, never directories, into a 0700 home removed after the run. A live run is recorded with `target: "live"`, never counts for the gate (the postmortem quotes the check's latest live record), and exits 2 with nothing recorded when no test ran; the live suite prints SKIP for such checks and exits 2 when none ran at all. This is the runbook's last step, after the push.
 
+`bin/check runbook push N [--plan]` puts `issue/N`'s fix on live. It uploads only the `server/` files of `main...issue/N`, with the prefix stripped. Other paths (`checks/`, `docs/`) are printed as "not pushed", and deleted files are printed as manual steps. It needs the committed `docs/runbooks/<date>-N-<slug>.md` on `issue/N`. Before writing anything, it refuses if `main` changed any of those files after `issue/N` was cut, and it pulls each file into the persistent `.dev/runbook-N/home/` (0700), refusing if live's copy is no longer `main`'s. A new file goes up through the deepest directory live already has, with everything else there excluded. `--plan` stops after printing the set and the `bin/mc diff` of each file. Otherwise each file is pushed with `MC_RUNBOOK=1`, journalled in `.dev/runbook-N/journal.jsonl` with its backup under `.dev/runbook-N/home/backups/`, and the run stops at the first failure. `bin/check runbook rollback N` prints the restore commands of the last run (pull, copy the backup back, push), plus the new files to delete by hand. Run them only after the user's OK. In a private repo (`.harness-private` in `MC_HOME`, or in the superproject of the `harness/` submodule), `bin/mc push` refuses without `MC_RUNBOOK=1`.
+
+`template/` is what a private server repo starts from:
+- root wrappers `bin/mc`, `bin/dev` and `bin/check` that use the repo root and its `.env` (`bin/mc pull` is refused unless `MC_HOME` is under `.dev/`);
+- `.gitignore`, `.claude/settings.json` (the `.env` deny rules), `.harness-private`;
+- `package.json`, which maps `#harness/*`;
+- a `Makefile` (`setup`; `hooks` links `hooks/private-pre-push`, which refuses any remote not on `vcs.martinfrackerjr.com`, and installs the submodule's guard; `test` refuses while either hook is missing);
+- `CLAUDE.md`, which covers the loop from seed to live check.
+
 ## Taking a task
 
 1. Locate: `bin/mc ls` from the root down (`plugins/`, the plugin's folder). Common places: `server.properties`, `bukkit.yml`, `spigot.yml`, `config/paper-*.yml`, `plugins/<Plugin>/config.yml` and the plugin's data folders, `logs/latest.log` for errors.
@@ -71,6 +80,8 @@ The bare-text loop needs no pod and no `--fresh`: `bin/check run <id>` (red), co
 3. Diagnose from the files and `logs/latest.log`. For plugin config questions, check the plugin's own documentation for the version in use (the version is in the jar name or the log's startup lines).
 4. Edit under `server/`, then show the user `bin/mc diff <path>` and wait for their OK.
 5. `bin/mc push <path>`, and tell the user what to run to apply it: the plugin's reload command, or a restart from the panel.
+
+In the private server repo (the one with `.harness-private`, which has this harness as its `harness/` submodule), step 5 is different. Live writes go through `bin/check runbook push N` there, and `bin/mc push` refuses without `MC_RUNBOOK=1`. A bare `bin/mc push` is for using the harness alone, without a private repo. See `template/CLAUDE.md`.
 
 ## Tests
 
