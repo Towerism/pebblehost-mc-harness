@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Refuse a push whose new commits touch a path the guard rejects.
+# Installed by `make hooks`. Git feeds "<local ref> <local sha> <remote ref> <remote sha>" lines.
+set -euo pipefail
+
+guard=$(dirname "$0")/../bin/path-guard
+# A replace ref could show git a clean commit in place of the one pushed.
+export GIT_NO_REPLACE_OBJECTS=1
+
+while read -r _ local_sha _ remote_sha; do
+  # Deleting a remote branch adds nothing.
+  [[ $local_sha =~ ^0+$ ]] && continue
+  # A tag naming a tree or a blob carries content no commit range covers.
+  if ! git rev-parse --verify -q "$local_sha^{commit}" >/dev/null; then
+    echo "pre-push: $local_sha is not a commit; push commits or tags of commits only" >&2
+    exit 2
+  fi
+  # A new branch, or a remote tip we don't have: compare with origin/main.
+  if [[ $remote_sha =~ ^0+$ ]] || ! git rev-parse --verify -q "$remote_sha^{commit}" >/dev/null; then
+    if ! base=$(git rev-parse --verify -q origin/main); then
+      echo "pre-push: origin/main not found; run git fetch origin (a first push to an empty remote has no base to compare with)" >&2
+      exit 2
+    fi
+  else
+    base=$remote_sha
+  fi
+  "$guard" --range "$base..$local_sha"
+done

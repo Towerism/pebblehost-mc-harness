@@ -10,6 +10,7 @@ Unit tests for `bin/mc`: `.env` parsing, the mapping to rclone variables, path s
 | File | Description |
 |------|-------------|
 | `mc.bats` | The unit tests; `setup` writes a `.env` with a password containing `$` and quotes |
+| `guard.bats` | Path-guard hooks, `bin/install-hooks` and `bin/path-guard` against a temp git repo whose `hooks/` is an untracked symlink to this repo's (plus a bare `origin`, a superproject or a worktree where needed); global git config is ignored |
 
 ## Subdirectories
 | Directory | Purpose |
@@ -24,6 +25,6 @@ Unit tests for `bin/mc`: `.env` parsing, the mapping to rclone variables, path s
 - Errors from `mc` exit 2.
 
 ### Testing Requirements
-`make test-unit` (`bats --jobs 8`); tests must stay independent so they can run in parallel.
+`make test-unit` (`bats --jobs 24`); tests must stay independent so they can run in parallel.
 
 ## Manual Notes

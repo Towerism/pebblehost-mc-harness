@@ -5,3 +5,4 @@ server/
 backups/
 .mc/
 .omc/
+node_modules/

@@ -10,14 +10,19 @@ A harness that lets Claude manage the files of one Minecraft server (Purpur) hos
 |------|-------------|
 | `CLAUDE.md` | Operating guide: `.env` contract, `bin/mc` commands, the pull → edit → diff → user OK → push loop |
 | `.env.example` | Template for `.env` (`PEBBLE_SFTP_HOST`, `PEBBLE_SFTP_PORT`, `PEBBLE_SFTP_USER`, `PEBBLE_PANEL_PASSWORD`, `PEBBLE_SERVER_NAME`) |
-| `Makefile` | `lint`, `test-unit`, `test-integration`, `test-live`, `test` |
-| `.gitignore` | Keeps `.env`, `server/`, `backups/`, `.mc/` and `.omc/` out of this public repo |
+| `Makefile` | `lint`, `test-unit`, `test-integration`, `test-live`, `test`, `hooks` |
+| `package.json`, `tsconfig.json` | Node 24 runs the TypeScript in `src/` directly (type stripping); `tsc --noEmit` only type-checks |
+| `.gitignore` | Keeps `.env`, `server/`, `backups/`, `.mc/`, `.omc/` and `node_modules/` out of this public repo |
 | `.claude/settings.json` | Denies Claude reading `.env` |
 
 ## Subdirectories
 | Directory | Purpose |
 |-----------|---------|
-| `bin/` | The `mc` command (see `bin/AGENTS.md`) |
+| `bin/` | The `mc` command and the `path-guard` shim (see `bin/AGENTS.md`) |
+| `src/guard/` | Path guard: `paths.ts` holds the allowlist, the case-insensitive denylist and the 512 KB cap; `cli.ts` checks staged files or commits, and also refuses symlinks and copies of local server files |
+| `hooks/` | `pre-commit`, `pre-merge-commit` and `pre-push`, run through the stubs `make hooks` installs |
+| `docs/` | `leak-response.md`: what to do when a server file or secret reaches this repo |
+| `.github/workflows/` | CI: `make lint test-unit` and the path guard over the PR's commits |
 | `test/` | Unit, integration and live test suites (see `test/AGENTS.md`) |
 
 Created at runtime and git-ignored: `server/` (local mirror of pulled server files), `backups/<ts>/{remote,local}/` (copies saved before a push or a re-pull), `.mc/` (per-path remote listings and local checksums).
@@ -27,16 +32,20 @@ Created at runtime and git-ignored: `server/` (local mirror of pulled server fil
 ### Working In This Directory
 - Never read, print, grep or source `.env`; `bin/mc` loads it.
 - Never commit anything from `server/` or `backups/`: server files can hold plugin database passwords and this repo is public.
+- Run `make hooks` in each new clone. `bin/install-hooks` writes stubs to the repo's shared hooks directory (`git rev-parse --git-common-dir`), so every worktree runs its own checkout's `hooks/<name>`, and a checkout without `hooks/` refuses the commit or push. It unsets `core.hooksPath` if that was `hooks`. The hooks run `bin/path-guard`, which exits 2 and lists every refused path; never bypass it with `--no-verify`.
+- Cherry-pick and rebase run no commit hook: `pre-push` (every new commit since the remote tip, or since `origin/main` for a new branch) and CI are the gate for those.
+- A new top-level directory or root file must be added to the allowlist in `src/guard/paths.ts`, with a test.
 - Changes to server files go through `bin/mc` and need the user's OK on the `bin/mc diff` before `bin/mc push`.
 
 ### Testing Requirements
-`make test` (lint, unit, integration) before committing a change to `bin/mc` or `test/`. `make test-live` is read-only against the real server.
+`npm ci` once, then `make test` (lint, unit, integration) before committing a change to `bin/`, `src/`, `hooks/` or `test/`. `make test-live` is read-only against the real server.
 
 ## Dependencies
 
 ### External
 - `rclone`: SFTP transfers and listings
-- `bats`: test runner; `shellcheck`: lint
+- `bats` (with GNU `parallel` for `--jobs`): test runner; `shellcheck`: lint
+- Node 24 or later; `typescript` and `@types/node`, exact-pinned dev dependencies
 - Docker with the `atmoz/sftp:alpine` image: integration tests
 
 ## Manual Notes

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Refuse a merge commit that stages a path the guard rejects. Installed by `make hooks`.
+# Cherry-pick and rebase run no commit hook; pre-push is the gate for those.
+set -euo pipefail
+
+exec "$(dirname "$0")/../bin/path-guard" --staged

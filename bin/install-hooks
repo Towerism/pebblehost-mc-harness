@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# install-hooks: install stubs in the repo's shared hooks directory that run
+# the current checkout's hooks/<name>. Every worktree of the repo gets them,
+# and a checkout without hooks/ refuses the commit or push instead of
+# skipping the guard. Run through `make hooks`.
+set -euo pipefail
+
+marker='# path-guard stub (bin/install-hooks)'
+dir=$(git rev-parse --path-format=absolute --git-common-dir)/hooks
+
+die() {
+  echo "install-hooks: $*" >&2
+  exit 2
+}
+
+# core.hooksPath would make git skip the shared hooks directory.
+case $(git config --get core.hooksPath || true) in
+  '') ;;
+  hooks) git config --unset core.hooksPath ;;
+  *) die "core.hooksPath is set to $(git config --get core.hooksPath); unset it first" ;;
+esac
+
+mkdir -p "$dir"
+for name in pre-commit pre-push pre-merge-commit; do
+  stub=$dir/$name
+  if [[ -e $stub ]] && ! grep -qxF "$marker" "$stub"; then
+    die "$stub exists and is not a path-guard stub; move it away first"
+  fi
+  cat >"$stub" <<EOF
+#!/usr/bin/env bash
+$marker
+hook=\$(git rev-parse --show-toplevel)/hooks/$name
+if [[ ! -x \$hook ]]; then
+  echo "path-guard hooks missing in this checkout: \$hook" >&2
+  exit 2
+fi
+exec "\$hook" "\$@"
+EOF
+  chmod +x "$stub"
+done
+echo "installed path-guard stubs in $dir"
