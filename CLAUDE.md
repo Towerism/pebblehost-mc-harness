@@ -1,0 +1,44 @@
+# PebbleHost Minecraft server harness
+
+This repo lets Claude work on the files of one Minecraft server hosted on PebbleHost. Server files are reached over SFTP through `bin/mc`; there is no console or restart access yet.
+
+## Credentials: `.env`
+
+`.env` in the repo root holds the panel sign-in and server name. Never read, print, grep or source it: `bin/mc` loads it itself, and `.claude/settings.json` denies reading it. If `mc` reports a missing variable, ask the user to fix `.env`; the variable names are in `.env.example`:
+
+- `PEBBLE_SFTP_HOST`, `PEBBLE_SFTP_PORT` (default 2022), `PEBBLE_SFTP_USER`: from the panel's Files → SFTP Credentials.
+- `PEBBLE_PANEL_PASSWORD`: the game panel password, which is also the SFTP password.
+- `PEBBLE_SERVER_NAME`: the server's display name. Use it when talking about the server; no command needs it.
+
+## `bin/mc`
+
+Paths are relative to the server root (`plugins/CrateReloaded/crates/vote.yml`); absolute paths and `..` are refused.
+
+| Command | Does |
+|---|---|
+| `bin/mc ls [path]` | list one remote directory level; directories end in `/` |
+| `bin/mc pull <path>` | copy a remote file or directory into `server/<path>`, replacing the local copy, and record the remote listing |
+| `bin/mc diff <path>` | unified diff remote → `server/<path>`; exit 1 when they differ |
+| `bin/mc push <path>` | upload `server/<path>`; first copies the current remote version to `backups/<ts>/remote/<path>` |
+
+Exit codes: 0 ok, 1 differences found (`diff` only), 2 error.
+
+- `pull` replaces `server/<path>` with the remote copy. If the local copy holds edits that were never pushed, it moves them to `backups/<ts>/local/<path>` first and says so.
+- `push` refuses when the remote listing (size and modtime, 1-second precision) changed since the last `pull` of that same path. Pull again, then reapply the edits from `backups/<ts>/local/`. Listings are kept per path: after pushing `plugins/X/a.yml`, a push of `plugins/X` is refused until `plugins/X` is pulled again.
+- `push` copies only: files deleted locally are not deleted remotely.
+- `pull`, `diff` and `push` on the server root need `--all`; don't use it without the user asking.
+- While the server runs, plugins rewrite their data files at any time. Push config files, not whole data folders.
+
+`server/`, `backups/` and `.mc/` are git-ignored: server files can hold plugin database passwords and must not be committed to this public repo.
+
+## Taking a task
+
+1. Locate: `bin/mc ls` from the root down (`plugins/`, the plugin's folder). Common places: `server.properties`, `bukkit.yml`, `spigot.yml`, `config/paper-*.yml`, `plugins/<Plugin>/config.yml` and the plugin's data folders, `logs/latest.log` for errors.
+2. Pull only what the task needs. Don't pull `world*/` or `plugins/*.jar` unless asked: they are large.
+3. Diagnose from the files and `logs/latest.log`. For plugin config questions, check the plugin's own documentation for the version in use (the version is in the jar name or the log's startup lines).
+4. Edit under `server/`, then show the user `bin/mc diff <path>` and wait for their OK.
+5. `bin/mc push <path>`, and tell the user what to run to apply it: the plugin's reload command, or a restart from the panel.
+
+## Tests
+
+`make test-unit` (stubbed rclone, about a second), `make test-integration` (one shared `atmoz/sftp` Docker container for the whole run), `make lint`, and `make test-live` for a read-only `ls` against the real server.
