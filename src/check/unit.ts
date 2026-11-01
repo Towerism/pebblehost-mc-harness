@@ -1,10 +1,10 @@
 // Harness API for bare-text checks, imported as '#harness/unit': `test`, and
 // bareText(file, path, literal), which asserts that the value at `path` in
-// server/<file> is exactly `literal`. .properties files take a key, YAML a
-// dotted path to a scalar. Nothing else is allowed in a bare-text check.
+// the committed server/<file> is exactly `literal`. .properties files take a
+// key, YAML a dotted path to a scalar. Nothing else is allowed in a
+// bare-text check.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { findYaml } from '../dev/overrides.ts';
 
 export { test } from 'node:test';
@@ -44,8 +44,13 @@ export function readValue(text: string, file: string, path: string): string {
   return v;
 }
 
+// The file as committed at MC_COMMIT (the run's commit), never the working
+// tree: an untracked or ignored file is not bare text the fix can commit.
 export function bareText(file: string, path: string, literal: string): void {
-  if (!process.env.MC_HOME) throw new Error('MC_HOME is not set: run checks with bin/check run');
+  const { MC_HOME: home, MC_COMMIT: commit } = process.env;
+  if (!home || !commit) throw new Error('MC_HOME or MC_COMMIT is not set: run checks with bin/check run');
   if (file.startsWith('/') || file.split('/').includes('..')) throw new Error(`bad server path ${file}`);
-  assert.equal(readValue(readFileSync(join(process.env.MC_HOME, 'server', file), 'utf8'), file, path), literal, `${file} ${path}`);
+  const r = spawnSync('git', ['-C', home, 'show', `${commit}:server/${file}`], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`server/${file} is not tracked at ${commit.slice(0, 12)}`);
+  assert.equal(readValue(r.stdout, file, path), literal, `${file} ${path}`);
 }

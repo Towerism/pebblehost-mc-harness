@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { boot } from '../dev/cli.ts';
 import { fail, type Docker } from '../dev/docker.ts';
 import { dirtyServer, git, labels, source } from '../dev/image.ts';
@@ -42,11 +43,21 @@ export type Run = { record: RunRecord; output: string };
 
 const TAIL = 40;
 
+// The only variables a check sees besides MC_*: no NODE_OPTIONS or other
+// NODE_* that could preload code into the run, nothing else from the caller.
+const KEEP_ENV = ['PATH', 'HOME', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'MC_DOCKER', 'DOCKER_HOST', 'DOCKER_CONFIG', 'DOCKER_CONTEXT', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'];
+const LOADER = pathToFileURL(join(import.meta.dirname, 'loader.ts')).href;
+
 export function runCheck(o: RunOpts, d: Docker): Run {
   const { kind } = readProfile(o.root, o.id);
   const hash = checkHash(o.root, o.id);
-  const tests = readdirSync(join(o.root, 'checks', o.id)).filter((f) => f.endsWith('.test.ts')).sort();
+  const entries = readdirSync(join(o.root, 'checks', o.id), { withFileTypes: true });
+  const tests = entries.filter((e) => e.isFile() && e.name.endsWith('.test.ts')).map((e) => e.name).sort();
   if (tests.length === 0) fail(`checks/${o.id} has no *.test.ts`);
+  // A bare-text check is its test files and profile.json; anything else (a
+  // package.json, a helper module, a directory) could change what it runs.
+  const extra = entries.filter((e) => !(e.isFile() && (e.name === 'profile.json' || e.name.endsWith('.test.ts')))).map((e) => e.name);
+  if (kind === 'bare-text' && extra.length > 0) fail(`checks/${o.id} is bare-text: only profile.json and *.test.ts are allowed, not ${extra.join(', ')}`);
   const p = podOf(o.root, o.pod);
   let id: Pick<RunRecord, 'source' | 'commit' | 'treeHash' | 'harnessHash' | 'imageHash' | 'fixturesHash' | 'generation' | 'fresh' | 'explored' | 'containerId'>;
   if (kind === 'e2e') {
@@ -71,13 +82,13 @@ export function runCheck(o: RunOpts, d: Docker): Run {
   try {
     const tap = join(tmp, 'tap');
     const files = tests.map((t) => `checks/${o.id}/${t}`);
-    const args = ['--test', '--test-isolation=none', '--test-reporter=spec', '--test-reporter-destination=stdout', '--test-reporter=tap', `--test-reporter-destination=${tap}`, ...files];
+    const env: Record<string, string> = { MC_HOME: o.root, MC_POD: o.pod, MC_TARGET: 'dev', MC_COMMIT: id.commit };
+    for (const k of KEEP_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
+    const args = ['--import', LOADER, '--test', '--test-isolation=none', '--test-reporter=spec', '--test-reporter-destination=stdout', '--test-reporter=tap', `--test-reporter-destination=${tap}`, ...files];
     const r = spawnSync(process.execPath, args, {
       cwd: o.root,
       encoding: 'utf8',
-      // NODE_TEST_CONTEXT, set when bin/check itself runs under node --test,
-      // would turn this run into a child reporting to a parent that isn't there.
-      env: { ...process.env, NODE_TEST_CONTEXT: undefined, MC_HOME: o.root, MC_POD: o.pod, MC_TARGET: 'dev' },
+      env,
       timeout: o.timeoutS * 1000,
       maxBuffer: 1 << 28,
       stdio: ['ignore', 'pipe', 'pipe'],
