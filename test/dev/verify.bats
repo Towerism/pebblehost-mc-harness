@@ -5,7 +5,7 @@
 bats_require_minimum_version 1.5.0
 
 check() {
-  timeout 300 "$BATS_TEST_DIRNAME/../../bin/check" "$@" --issue 7 </dev/null
+  timeout 300 "$BATS_TEST_DIRNAME/../../bin/check" "$@" --issue "${ISSUE:-7}" </dev/null
 }
 
 dev() {
@@ -72,25 +72,62 @@ EOF
   [ "$status" -eq 1 ]
   [[ $output == *"explored: does not count as a red"* ]]
   [ "$(rec 1 explored)" = true ]
+  # Issue 8's only red is on this explored volume.
+  ISSUE=8 run check run 7-difficulty
+  [ "$status" -eq 1 ]
 }
 
-@test "a fix commit counts only once rebuilt: the run before rebuild still reports the booted commit" {
+@test "a green made by hand on the red's image is refused: it booted the red's commit" {
+  run dev console difficulty normal
+  [ "$status" -eq 0 ]
+  run check run 7-difficulty
+  [ "$status" -eq 0 ]
+  [ "$(rec 2 commit)" = "$(rec 0 commit)" ]
+  run check gate 7-difficulty
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [[ $output == *"G3: the green booted "*"not a strict descendant"* ]]
+}
+
+@test "a fix commit counts only once rebuilt; then the gate passes, confirms, and allows the docs" {
   booted=$(git -C "$MC_HOME" rev-parse HEAD)
   sed -i 's/^difficulty=easy$/difficulty=normal/' "$MC_HOME/server/server.properties"
   git -C "$MC_HOME" commit -q -am 'fix: normal difficulty'
+  # Not rebuilt yet: the pod still reports the booted commit.
   run check run 7-difficulty
-  [ "$status" -eq 1 ]
-  [ "$(rec 2 commit)" = "$booted" ]
+  [ "$(rec 3 commit)" = "$booted" ]
+  run check postmortem 7-difficulty
+  [ "$status" -eq 2 ]
+  [[ $output == *"the gate refuses 7-difficulty"* ]]
   run dev rebuild
   [ "$status" -eq 0 ]
   run check run 7-difficulty
+  [ "$status" -eq 0 ]
+  [ "$(rec 4 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
+  [ "$(rec 4 generation)" != "$(rec 0 generation)" ]
+  run check gate 7-difficulty
   echo "$output"
   [ "$status" -eq 0 ]
-  [ "$(rec 3 pass)" = true ]
-  [ "$(rec 3 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
-  [ "$(rec 3 fresh)" = false ]
-  [ "$(rec 3 explored)" = false ]
-  [ "$(rec 3 generation)" != "$(rec 0 generation)" ]
+  [[ $output == *"gate: 7-difficulty passed and confirmed"* ]]
+  [ "$(rec 5 confirm)" = true ]
+  [ "$(rec 5 pass)" = true ]
+  run check postmortem 7-difficulty
+  [ "$status" -eq 0 ]
+  pm=$(ls "$MC_HOME"/docs/postmortems/*-7-difficulty.md)
+  grep -q "failed on commit \`$booted\`" "$pm"
+  grep -q 'server.properties' "$pm"
+  run check runbook 7-difficulty
+  [ "$status" -eq 0 ]
+  grep -q 'bin/check run 7-difficulty --target live --issue 7' "$MC_HOME"/docs/runbooks/*-7-difficulty.md
+}
+
+@test "a red on an explored volume never counts, even with a valid green later" {
+  ISSUE=8 run check run 7-difficulty
+  [ "$status" -eq 0 ]
+  ISSUE=8 run check gate 7-difficulty
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [[ $output == *"G9: the red's volume "*" was explored"* ]]
 }
 
 @test "down --all leaves nothing labelled" {
