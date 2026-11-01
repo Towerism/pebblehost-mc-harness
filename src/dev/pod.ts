@@ -178,26 +178,43 @@ export function waitDone(p: Pod, d: Docker, since: number, timeoutS: number): nu
   }
 }
 
-export type BootReport = { done: number | null; enabled: string[]; failed: { plugin: string; line: string }[]; errors: string[] };
+export type BootReport = { done: number | null; enabled: string[]; failed: { plugin: string; line: string; cause: string }[]; errors: string[]; noise: number };
+
+// ERROR lines expected from any offline pod: auth key fetches, update and
+// version checks, SLF4J's no-provider notice.
+export const OFFLINE_NOISE = [/yggdrasil|publickeys/i, /SLF4J/, /update ?check|check(ing)? for (an? )?updates?|latest (build|release|version)/i];
 
 // Read a server's latest.log: boot time, plugins enabled, plugins that failed
 // to load or enable, and ERROR lines.
 export function parseBootReport(log: string): BootReport {
-  const r: BootReport = { done: null, enabled: [], failed: [], errors: [] };
-  for (const line of log.split('\n')) {
+  const r: BootReport = { done: null, enabled: [], failed: [], errors: [], noise: 0 };
+  const lines = log.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const done = DONE.exec(line);
     if (done && r.done === null) r.done = Number(done[1].replace(',', '.'));
-    const en = /\]: \[[^\]]+\] Enabling (\S+)/.exec(line);
+    // "Enabling <Name> v<version>" only: plugins also log "Enabling x...".
+    const en = /\]: \[[^\]]+\] Enabling (\S+) v\d/.exec(line);
     if (en && !r.enabled.includes(en[1])) r.enabled.push(en[1]);
     const bad = /Error occurred while enabling (\S+)/.exec(line) ?? /Could not load '(?:.*\/)?([^/']+?)\.jar'/.exec(line) ?? /Could not load plugin '(?:.*\/)?([^/']+?)\.jar'/.exec(line);
     if (bad) {
-      r.failed.push({ plugin: bad[1], line: line.trim() });
+      r.failed.push({ plugin: bad[1], line: line.trim(), cause: cause(lines, i) });
       // "Enabling X" comes before the failure: X did not end up enabled.
       r.enabled = r.enabled.filter((e) => e.toLowerCase() !== bad[1].toLowerCase());
     }
-    else if (/[ /](ERROR|SEVERE)\]:/.test(line)) r.errors.push(line.trim());
+    else if (/[ /](ERROR|SEVERE)\]:/.test(line)) {
+      if (OFFLINE_NOISE.some((re) => re.test(line))) r.noise++;
+      else r.errors.push(line.trim());
+    }
   }
   return r;
+}
+
+// The first "Caused by:" of the stack trace after line i, else its first line.
+function cause(lines: string[], i: number): string {
+  const trace: string[] = [];
+  for (let j = i + 1; j < lines.length && !/^\[\d/.test(lines[j]); j++) trace.push(lines[j].trim());
+  return trace.find((l) => l.startsWith('Caused by:')) ?? trace.find(Boolean) ?? lines[i].trim();
 }
 
 // With `live` (the live server's latest.log), compare the plugins enabled:
@@ -211,15 +228,16 @@ export function formatBootReport(r: BootReport, live?: BootReport): string {
     const liveLower = new Set(live.enabled.map((e) => e.toLowerCase()));
     out.push(`plugins enabled: ${live.enabled.length - missing.length}/${live.enabled.length} of live`);
     for (const m of missing) {
-      const line = r.failed.find((f) => f.plugin.toLowerCase() === m.toLowerCase())?.line ?? r.errors.find((e) => e.toLowerCase().includes(m.toLowerCase()));
+      const line = r.failed.find((f) => f.plugin.toLowerCase() === m.toLowerCase())?.cause ?? r.errors.find((e) => e.toLowerCase().includes(m.toLowerCase()));
       out.push(`  not enabled: ${m}: ${line ?? 'no error line names it'}`);
     }
     for (const extra of r.enabled.filter((e) => !liveLower.has(e.toLowerCase()))) out.push(`  enabled on dev only: ${extra}`);
   } else {
     out.push(`plugins enabled: ${r.enabled.length}${r.enabled.length ? ` (${r.enabled.join(', ')})` : ''}`);
   }
-  out.push(`plugins failed: ${r.failed.length}`, ...r.failed.map((f) => `  ${f.plugin}: ${f.line}`));
+  out.push(`plugins failed: ${r.failed.length}`, ...r.failed.map((f) => `  ${f.plugin}: ${f.cause}`));
   out.push(`errors: ${r.errors.length}`, ...r.errors.slice(0, 20).map((e) => `  ${e}`));
+  out.push(`offline noise: ${r.noise} (auth key fetch, update checks, SLF4J)`);
   return out.join('\n');
 }
 
