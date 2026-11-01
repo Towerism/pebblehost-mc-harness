@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# check in the private server repo: harness/bin/check on this repo and its .env.
+set -euo pipefail
+
+root=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+export MC_HOME=$root MC_ENV_FILE=${MC_ENV_FILE:-$root/.env}
+exec "$root/harness/bin/check" "$@"

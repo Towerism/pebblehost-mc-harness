@@ -1,0 +1,7 @@
+.env
+.env.*
+backups/
+.mc/
+.dev/
+.omc/
+node_modules/

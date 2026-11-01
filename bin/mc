@@ -50,6 +50,9 @@ pull, diff and push on the server root (no path or .) need --all.
 Paths are relative to the server root, e.g. plugins/CrateReloaded/config.yml
 From a linked git worktree, .env (when the worktree has none) and backups/
 are the main checkout's; server/ and .mc/ stay in the worktree.
+In a private server repo (.harness-private in MC_HOME or in the superproject
+of this harness), push refuses unless MC_RUNBOOK=1: bin/check runbook push
+sets it.
 MC_EXCLUDE_FILE names an rclone exclude file (one pattern per line, matched
 relative to the path given): matching paths are left out of every listing
 and transfer of a directory (rclone takes no filters on a single file;
@@ -59,6 +62,17 @@ EOF
 }
 
 die() { echo "mc: $*" >&2; exit 2; }
+
+# A private server repo: $MC_HOME holds .harness-private, or this script is
+# in a submodule whose superproject does. Live writes there go through
+# bin/check runbook push, which sets MC_RUNBOOK=1. A rail, not a boundary.
+in_private_repo() {
+  local super
+  [[ -f $home/.harness-private ]] && return 0
+  command -v git >/dev/null || return 1
+  super=$(unset GIT_DIR GIT_WORK_TREE; git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-superproject-working-tree 2>/dev/null) || return 1
+  [[ -n $super && -f $super/.harness-private ]]
+}
 
 # Parse KEY=VALUE lines without sourcing, so passwords with $ or quotes stay literal.
 load_env() {
@@ -230,6 +244,9 @@ main() {
     -h | --help | help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
+  if [[ $cmd == push && ${MC_RUNBOOK:-} != 1 ]] && in_private_repo; then
+    die "in the private server repo, live writes go through bin/check runbook push N (it pushes the issue's server/ diff, refuses on drift and keeps a journal); a bare push is for the harness alone"
+  fi
   load_env
   configure_rclone
   tmp=$(mktemp -d)
