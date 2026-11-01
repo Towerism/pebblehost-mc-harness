@@ -62,7 +62,9 @@ export async function handle(line: string, ops: Record<string, Handler>): Promis
 }
 
 // The request is the first line, or everything sent before the client's EOF.
-export function serve(path: string, ops: Record<string, Handler>): Promise<Server> {
+// A client that sends neither within idleMs gets an error reply and is
+// dropped; the handler itself has no such limit.
+export function serve(path: string, ops: Record<string, Handler>, idleMs = 30_000): Promise<Server> {
   rmSync(path, { force: true });
   // allowHalfOpen: a client that ends its side right after the request still
   // gets the reply.
@@ -71,8 +73,15 @@ export function serve(path: string, ops: Record<string, Handler>): Promise<Serve
     let answered = false;
     const answer = async (line: string) => {
       answered = true;
+      c.setTimeout(0);
       c.end(`${JSON.stringify(await handle(line, ops))}\n`);
     };
+    c.setTimeout(idleMs, () => {
+      if (answered) return;
+      answered = true;
+      c.end(`${JSON.stringify({ ok: false, error: `no complete request within ${idleMs}ms` })}\n`);
+      c.destroySoon();
+    });
     c.setEncoding('utf8');
     c.on('data', (s: string) => {
       if (answered) return;
