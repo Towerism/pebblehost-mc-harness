@@ -8,7 +8,6 @@
 // fixtures. inventory proposes data rules from files live rewrites between
 // two listings.
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fail } from '../dev/docker.ts';
@@ -17,9 +16,6 @@ import { readRules, rcloneExcludes, matchRule, writeGitignore, DEFAULT_RULES, ty
 
 // The server paths main tracks, besides the jars at the root.
 export const SYNC_ROOTS = ['server.properties', 'bukkit.yml', 'spigot.yml', 'eula.txt', 'start.sh', 'config', 'plugins', 'libraries', 'versions', 'cache'];
-// Purpur updates and plugin library downloads rewrite these: listed again
-// only when a root or plugins/ jar changed, the rules changed, or with --full.
-const JAR_ROOTS = ['libraries', 'versions', 'cache'];
 // An incremental sync with no changed files should finish within this.
 const BUDGET_S = 30;
 // SFTP modtimes have 1-second precision, and live's clock may be off from
@@ -100,9 +96,9 @@ function worktree(root: string): string {
 export type Entry = { size: number; time: string };
 export type Listing = Record<string, Entry>;
 // What the last sync saw: its listing, when that listing started and where
-// its window starts (epoch s), the server/ tree it left on main, and the
-// hash of the skip and data rules it listed with.
-type Stored = { start: number; since?: number; tree: string; rules?: string; files: Listing };
+// its window starts (epoch s; listings stored before the window have none),
+// and the server/ tree it left on main.
+type Stored = { start: number; since?: number; tree: string; files: Listing };
 
 const listingFile = (root: string) => join(root, '.dev', 'sync-listing.json');
 const epoch = (time: string) => Date.parse(`${time.replace(' ', 'T')}Z`) / 1000;
@@ -150,31 +146,25 @@ function checkers(): string {
   return n;
 }
 
-// One recursive listing of the given roots (root jars too with `jars`),
-// minus skip and data paths. One call at a time: live's SFTP refuses
-// connections past a few concurrent listers.
-function listLive(wt: string, root: string, rules: Rule[], roots: string[], jars: boolean): Listing {
+// One recursive listing of every tracked root and the root jars, minus skip
+// and data paths, in a single call: live's SFTP refuses connections past a
+// few concurrent listers.
+function listLive(wt: string, root: string, rules: Rule[]): Listing {
   const f = join(wt, '.mc-filter');
   const ex = rcloneExcludes(rules, ['skip', 'data']).split('\n').filter(Boolean).map((l) => `- ${l}`);
-  const inc = [...roots.flatMap((r) => [`+ /${r}`, `+ /${r}/**`]), ...(jars ? ['+ /*.[jJ][aA][rR]'] : [])];
+  const inc = [...SYNC_ROOTS.flatMap((r) => [`+ /${r}`, `+ /${r}/**`]), '+ /*.jar'];
   writeFileSync(f, `${[...ex, ...inc, '- **'].join('\n')}\n`);
   const r = mc(wt, root, ['ls', '-R', '-l'], undefined, { MC_FILTER_FILE: f, RCLONE_CHECKERS: checkers() });
   rmSync(f, { force: true });
   if (r.status !== 0) fail(`listing live failed:\n${r.out.trim()}`);
   const files = parseListing(r.out);
-  // rclone's filters match case; the rules don't.
-  for (const p of Object.keys(files)) if (matchRule(rules, p)) delete files[p];
+  // The filter ignores case, as the rules do; the root names don't.
+  for (const p of Object.keys(files)) {
+    const top = p.split('/')[0];
+    if (!(SYNC_ROOTS.includes(top) || (top === p && p.toLowerCase().endsWith('.jar'))) || matchRule(rules, p)) delete files[p];
+  }
   return files;
 }
-
-const underJarRoots = (p: string) => JAR_ROOTS.some((r) => p.startsWith(`${r}/`));
-// Root jars and top-level plugins/*.jar: a change to any may rewrite the jar roots.
-export const jarKey = (files: Listing) =>
-  Object.keys(files)
-    .filter((p) => /^(plugins\/)?[^/]+\.jar$/i.test(p))
-    .sort()
-    .map((p) => `${p} ${files[p].size} ${files[p].time}`)
-    .join('\n');
 
 function readStored(root: string): Stored | undefined {
   try {
@@ -184,10 +174,13 @@ function readStored(root: string): Stored | undefined {
   }
 }
 
-const rulesKey = (rules: Rule[]) =>
-  createHash('sha256')
-    .update(rules.filter((r) => r.cls !== 'review').map((r) => `${r.cls} ${r.pattern}`).join('\n'))
-    .digest('hex');
+// Files under `server` that rules of `classes` cover, removed: what a pull's
+// rclone excludes let through.
+function dropCovered(server: string, rules: Rule[], classes: RuleClass[]): void {
+  for (const e of existsSync(server) ? readdirSync(server, { recursive: true, withFileTypes: true }) : []) {
+    if (e.isFile() && matchRule(rules, relative(server, join(e.parentPath, e.name)), classes)) rmSync(join(e.parentPath, e.name));
+  }
+}
 
 // Empty directories from `dir` up to (not including) `top`.
 function prune(dir: string, top: string): void {
@@ -225,22 +218,16 @@ export function syncLive(root: string, full = false): SyncResult {
     commits.push('chore: regenerate the sync-rules section of .gitignore');
   }
   const start = Date.now() / 1000;
-  const listed = listLive(wt, root, rules, SYNC_ROOTS.filter((r) => !JAR_ROOTS.includes(r)), true);
-  const ruleHash = rulesKey(rules);
-  const relist = why ? 'full' : !stored ? 'full' : jarKey(stored.files) !== jarKey(listed) ? 'a root or plugins/ jar changed' : stored.rules !== ruleHash ? 'sync-rules changed' : '';
-  // Kept entries go through the rules too: a rule may have changed since.
-  const kept = stored ? Object.fromEntries(Object.entries(stored.files).filter(([p]) => underJarRoots(p) && !matchRule(rules, p))) : {};
-  const files = { ...listed, ...(relist ? listLive(wt, root, rules, JAR_ROOTS, false) : kept) };
+  const files = listLive(wt, root, rules);
   let fetched = 0;
   if (why) {
     say(`sync: full pull (${why})`);
     fullPull(wt, root, rules);
   } else if (stored) {
-    say(`sync: ${JAR_ROOTS.join(', ')}: ${relist ? `listed again (${relist})` : 'kept the last listing (no jar or sync-rules change)'}`);
     if (Object.keys(files).length === 0) fail('live has none of the tracked roots; is MC_ENV_FILE the right server?');
-    // Unlisted roots keep their stored entries: diff only what was listed.
-    const prev = relist ? stored.files : Object.fromEntries(Object.entries(stored.files).filter(([p]) => !underJarRoots(p)));
-    const { fetch, recheck, remove } = diffListing(prev, relist ? files : listed, stored.since ?? windowStart(stored.start, stored.files));
+    // A rules change needs nothing special: files a removed rule covered are
+    // missing from the stored listing, and those a new rule covers from this one.
+    const { fetch, recheck, remove } = diffListing(stored.files, files, stored.since ?? windowStart(stored.start, stored.files));
     const server = join(wt, 'server');
     // Removals first, pruning what they empty: a directory live replaced by
     // a file must be gone before the file comes down.
@@ -258,7 +245,7 @@ export function syncLive(root: string, full = false): SyncResult {
   }
   // Written only once main holds what the listing describes.
   const done = () => {
-    const stored: Stored = { start, since: windowStart(start, files), tree: serverTree(wt), rules: ruleHash, files };
+    const stored: Stored = { start, since: windowStart(start, files), tree: serverTree(wt), files };
     writeFileSync(listingFile(root), JSON.stringify(stored), { mode: 0o600 });
     say(timing((Date.now() - t0) / 1000, !why, fetched));
   };
@@ -298,10 +285,7 @@ function fullPull(wt: string, root: string, rules: Rule[]): void {
     pull(wt, root, r, rules, ['skip', 'data'], dirs.has(r));
     say(`sync: pulled ${r}`);
   }
-  const server = join(wt, 'server');
-  for (const e of existsSync(server) ? readdirSync(server, { recursive: true, withFileTypes: true }) : []) {
-    if (e.isFile() && matchRule(rules, relative(server, join(e.parentPath, e.name)))) rmSync(join(e.parentPath, e.name));
-  }
+  dropCovered(join(wt, 'server'), rules, ['skip', 'data']);
 }
 
 export type SeedOpts = { withData: string[]; withWorlds: boolean };
@@ -350,6 +334,7 @@ export function seedData(root: string, n: number, o: SeedOpts): string[] {
   // Fixtures only when something arrived: an empty directory, or one whose
   // files skip rules all left out, boots with none.
   const data = join(home, 'server');
+  dropCovered(data, rules, ['skip']);
   if (paths.length > 0 && !(existsSync(data) && readdirSync(data, { recursive: true, withFileTypes: true }).some((e) => e.isFile()))) {
     say('seed: the data paths held no files to pull; booting with no data fixtures');
     return [];

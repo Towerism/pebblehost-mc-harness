@@ -2,15 +2,14 @@
 // rewrites during the copy fails the sync once, quoting rclone's line and
 // saying to run it again (one attempt, no loop, no drift commit), and a
 // --with-data path a skip rule covers is refused before anything runs. The
-// incremental sync's listing parse, window, diff and jar key, and its timing
-// line.
+// incremental sync's listing parse, window and diff, and its timing line.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HARNESS_ROOT } from '../../src/dev/image.ts';
-import { diffListing, jarKey, parseListing, timing, windowStart } from '../../src/sync/sync.ts';
+import { diffListing, parseListing, timing, windowStart } from '../../src/sync/sync.ts';
 import { commit, ENV, git, tmp } from './project.ts';
 
 function setup(): { root: string; log: string; dev: (...args: string[]) => ReturnType<typeof spawnSync> } {
@@ -93,15 +92,6 @@ test('diffListing fetches new, resized and re-dated files, re-checks unchanged o
   };
   assert.deepEqual(diffListing(prev, next, since), { fetch: ['added', 'redated', 'resized'], recheck: ['edge'], remove: ['gone'] });
   assert.deepEqual(diffListing(next, next, Date.parse('2026-11-02T00:00:00Z') / 1000), { fetch: [], recheck: [], remove: [] });
-});
-
-test('the jar-roots key covers root jars and top-level plugins/*.jar only', () => {
-  const base = { 'purpur.jar': { size: 1, time: '2026-11-01 11:00:00' }, 'plugins/Eco.jar': { size: 1, time: '2026-11-01 11:00:00' }, 'plugins/Eco/lib.jar': { size: 1, time: '2026-11-01 11:00:00' }, 'plugins/Eco/config.yml': { size: 1, time: '2026-11-01 11:00:00' } };
-  const key = jarKey(base);
-  assert.notEqual(jarKey({ ...base, 'plugins/Eco.jar': { size: 2, time: '2026-11-01 11:00:00' } }), key);
-  assert.notEqual(jarKey({ ...base, 'plugins/New.JAR': { size: 1, time: '2026-11-01 11:00:00' } }), key);
-  assert.notEqual(jarKey({ ...base, 'purpur.jar': { size: 1, time: '2026-11-01 11:00:01' } }), key);
-  assert.equal(jarKey({ ...base, 'plugins/Eco/lib.jar': { size: 9, time: '2026-11-01 11:00:00' }, 'plugins/Eco/config.yml': { size: 9, time: '2026-11-01 11:00:00' } }), key);
 });
 
 test('the timing line warns OVER BUDGET only for an incremental sync with no changed files past 30 s', () => {
