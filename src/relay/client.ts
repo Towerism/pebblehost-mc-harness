@@ -3,7 +3,9 @@
 // one JSON reply. Exit 0 when the reply is ok, 2 otherwise.
 import { connect } from 'node:net';
 
-const TIMEOUT_MS = 60_000;
+// A minute past the request's own timeoutMs (bot.join, bot.waitMessage), so a
+// long bot wait is never cut short here.
+const MARGIN_MS = 60_000;
 
 function done(reply: string): never {
   process.stdout.write(reply.endsWith('\n') ? reply : `${reply}\n`);
@@ -23,10 +25,18 @@ for await (const chunk of process.stdin) input += chunk;
 const line = input.trim();
 if (line === '' || line.includes('\n')) failed('send one JSON request on stdin');
 
+let asked = 0;
+try {
+  const t = JSON.parse(line).timeoutMs;
+  if (typeof t === 'number' && t > 0) asked = Math.min(t, 600_000);
+} catch {
+  // the daemon answers a bad request itself
+}
+const timeout = MARGIN_MS + asked;
 let reply = '';
 const sock = connect(process.env.RELAY_SOCKET || '/run/relay.sock');
 sock.setEncoding('utf8');
-sock.setTimeout(TIMEOUT_MS, () => failed(`relay: no reply within ${TIMEOUT_MS / 1000}s`));
+sock.setTimeout(timeout, () => failed(`relay: no reply within ${timeout / 1000}s`));
 sock.on('connect', () => sock.write(`${line}\n`));
 sock.on('data', (s: string) => (reply += s));
 sock.on('end', () => (reply ? done(reply) : failed('relay: closed without a reply')));
