@@ -3,8 +3,9 @@
 // container (src/relay/) on that network only, which holds the RCON connection. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { constants as sqliteConst, DatabaseSync } from 'node:sqlite';
 import { fail, must, type Docker } from './docker.ts';
 import { dirHash, privateDir, walk } from './image.ts';
 
@@ -70,10 +71,37 @@ function labelArgs(p: Pod): string[] {
 }
 
 // Merge fixture directories into dest; the same path from two sources with
-// different content is refused. Returns the fixtures hash.
-export function mergeFixtures(sources: string[], dest: string): string {
-  rmSync(dest, { recursive: true, force: true });
-  mkdirSync(dest, { recursive: true });
+// different content is refused. Then build each sqlite target (server path ->
+// SQL file) as a new database; a target that is also a fixture file is
+// refused. Returns the fixtures hash: the merged files' hash, extended by
+// each target and its SQL bytes (not the built bytes) when there are any.
+// It builds in a sibling directory and swaps that in for dest only once
+// complete, so a failed build leaves dest (a running pod's /fixtures, which
+// rebuild replaces only afterwards) as it was. dest's parent must be private
+// (callers use a 0700 directory): the siblings have predictable names.
+export function mergeFixtures(sources: string[], dest: string, sqlite: Record<string, string> = {}): string {
+  const next = `${dest}.next`;
+  const old = `${dest}.old`;
+  for (const dir of [next, old]) rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dirname(next), { recursive: true });
+  mkdirSync(next);
+  try {
+    const h = buildFixtures(sources, next, sqlite);
+    if (existsSync(dest)) renameSync(dest, old);
+    renameSync(next, dest);
+    rmSync(old, { recursive: true, force: true });
+    return h;
+  } catch (e) {
+    rmSync(next, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+// SQL may only build its own database: ATTACH (and VACUUM INTO, which
+// attaches) would write files outside the fixtures.
+const noAttach = (action: number) => (action === sqliteConst.SQLITE_ATTACH || action === sqliteConst.SQLITE_DETACH ? sqliteConst.SQLITE_DENY : sqliteConst.SQLITE_OK);
+
+function buildFixtures(sources: string[], dest: string, sqlite: Record<string, string>): string {
   const from = new Map<string, string>();
   for (const src of sources) {
     for (const rel of walk(src)) {
@@ -87,7 +115,40 @@ export function mergeFixtures(sources: string[], dest: string): string {
       cpSync(join(src, rel), join(dest, rel));
     }
   }
-  return dirHash(dest);
+  const files = dirHash(dest);
+  const targets = Object.keys(sqlite).sort();
+  if (targets.length === 0) return files;
+  const h = createHash('sha256').update(`${files}\n`);
+  for (const target of targets) {
+    const sql = sqlite[target];
+    const prev = from.get(target);
+    if (prev !== undefined) fail(`fixture conflict: ${target} is both a file in ${prev} and built from ${sql}`);
+    // SQLite would delete or reuse these, but they are already hashed.
+    for (const ext of ['-journal', '-wal', '-shm']) {
+      const side = from.get(`${target}${ext}`);
+      if (side !== undefined) fail(`fixture conflict: ${target}${ext} is a file in ${side} beside the database built from ${sql}`);
+    }
+    const st = lstatSync(sql, { throwIfNoEntry: false });
+    if (st?.isSymbolicLink()) fail(`symlink refused: ${sql}`);
+    if (!st?.isFile()) fail(`sqlite fixture ${sql}: not a file`);
+    const text = readFileSync(sql);
+    h.update(`sqlite ${target} ${createHash('sha256').update(text).digest('hex')}\n`);
+    try {
+      mkdirSync(dirname(join(dest, target)), { recursive: true });
+      const db = new DatabaseSync(join(dest, target));
+      try {
+        if (typeof db.setAuthorizer !== 'function' || typeof db.enableDefensive !== 'function') fail(`Node ${process.version}'s node:sqlite has no setAuthorizer or enableDefensive; sqlite fixtures need Node 24.12 or later`);
+        db.enableDefensive(true);
+        db.setAuthorizer(noAttach);
+        db.exec(text.toString('utf8'));
+      } finally {
+        db.close();
+      }
+    } catch (e) {
+      fail(`sqlite fixture ${sql}: ${(e as Error).message}`);
+    }
+  }
+  return h.digest('hex');
 }
 
 // generation: a new id for each new volume; fresh: made by bin/check run
@@ -365,7 +426,7 @@ export function bootTimeout(boots: number[]): number {
   return Math.max(120, Math.ceil(3 * s[Math.floor(s.length / 2)]));
 }
 
-export type PodFile = { fixtures: string[]; jar?: string; heap?: string };
+export type PodFile = { fixtures: string[]; sqlite?: Record<string, string>; jar?: string; heap?: string };
 
 export function readPodFile(p: Pod): PodFile {
   const f = join(names(p).dir, 'pod.json');

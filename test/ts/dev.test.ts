@@ -7,10 +7,12 @@ import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { DevError, type Docker } from '../../src/dev/docker.ts';
 import { build, buildContext, chooseJar, dirHash, dirtyHarness, toolHash, HARNESS_INPUTS, RELAY_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
 import { applyOverrides, OVERRIDES, setProperty, setYaml } from '../../src/dev/overrides.ts';
-import { bootTimeout, createJoin, createPod, EGRESS_SINKS, formatBootReport, mergeFixtures, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
+import { bootTimeout, createJoin, createPod, EGRESS_SINKS, formatBootReport, mergeFixtures, names, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
+import { podFile } from '../../src/dev/cli.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dev-test-'));
 
@@ -406,6 +408,72 @@ test('mergeFixtures: union of sources, identical overlap allowed, conflicting ov
   assert.equal(mergeFixtures([], join(tmp(), 'empty')), dirHash(join(tmp())));
   write(b, { 'x.yml': 'other' });
   assert.throws(() => mergeFixtures([a, b], dest), /fixture conflict: x\.yml/);
+});
+
+test('mergeFixtures: sqlite builds each database from its SQL; the hash covers the SQL and its target', () => {
+  const fx = tmp();
+  const sql = tmp();
+  write(fx, { 'plugins/E/config.yml': 'c' });
+  write(sql, { 'economy.sql': "CREATE TABLE users (name TEXT, coins INTEGER); INSERT INTO users VALUES ('ann', 5), ('bob', 7);", 'broken.sql': 'CREATE TABLE (;' });
+  const dest = join(tmp(), 'fixtures');
+  const h = mergeFixtures([fx], dest, { 'plugins/E/data.db': join(sql, 'economy.sql') });
+  const db = new DatabaseSync(join(dest, 'plugins/E/data.db'), { readOnly: true });
+  assert.deepEqual(db.prepare('SELECT name, coins FROM users ORDER BY name').all().map((r) => ({ ...r })), [{ name: 'ann', coins: 5 }, { name: 'bob', coins: 7 }]);
+  db.close();
+  assert.equal(readFileSync(join(dest, 'plugins/E/config.yml'), 'utf8'), 'c');
+  assert.equal(mergeFixtures([fx], join(tmp(), 'again'), { 'plugins/E/data.db': join(sql, 'economy.sql') }), h);
+  assert.notEqual(h, mergeFixtures([fx], join(tmp(), 'plain')));
+  assert.notEqual(h, mergeFixtures([fx], join(tmp(), 'moved'), { 'plugins/E/other.db': join(sql, 'economy.sql') }));
+  write(sql, { 'economy.sql': "CREATE TABLE users (name TEXT, coins INTEGER); INSERT INTO users VALUES ('ann', 6);" });
+  assert.notEqual(h, mergeFixtures([fx], join(tmp(), 'changed'), { 'plugins/E/data.db': join(sql, 'economy.sql') }));
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'broken'), { 'b.db': join(sql, 'broken.sql') }), new RegExp(`sqlite fixture ${join(sql, 'broken.sql')}: .*syntax error`));
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'clash'), { 'plugins/E/config.yml': join(sql, 'economy.sql') }), /fixture conflict: plugins\/E\/config\.yml is both a file in .* and built from .*economy\.sql/);
+  for (const ext of ['-journal', '-wal', '-shm']) {
+    const side = tmp();
+    write(side, { [`plugins/E/data.db${ext}`]: 'x' });
+    assert.throws(() => mergeFixtures([side], join(tmp(), 'side'), { 'plugins/E/data.db': join(sql, 'economy.sql') }), new RegExp(`fixture conflict: plugins/E/data\\.db${ext} is a file in .* beside the database built from .*economy\\.sql`), ext);
+  }
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'under'), { 'plugins/E/config.yml/x.db': join(sql, 'economy.sql') }), /sqlite fixture .*economy\.sql: /);
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'gone'), { 'g.db': join(sql, 'missing.sql') }), (e) => e instanceof DevError && /sqlite fixture .*missing\.sql: not a file/.test(e.message));
+  symlinkSync(join(sql, 'economy.sql'), join(sql, 'link.sql'));
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'link'), { 'l.db': join(sql, 'link.sql') }), /symlink refused: .*link\.sql/);
+});
+
+test('mergeFixtures: sqlite SQL cannot write outside the fixtures (ATTACH, VACUUM INTO)', () => {
+  const sql = tmp();
+  const outside = tmp();
+  write(sql, { 'attach.sql': `CREATE TABLE t (a); ATTACH DATABASE '${join(outside, 'a.db')}' AS x; CREATE TABLE x.t (a);`, 'vacuum.sql': `CREATE TABLE t (a); VACUUM INTO '${join(outside, 'v.db')}';` });
+  for (const f of ['attach.sql', 'vacuum.sql']) {
+    assert.throws(() => mergeFixtures([], join(tmp(), 'fx'), { 'd.db': join(sql, f) }), (e) => e instanceof DevError && e.message.startsWith(`sqlite fixture ${join(sql, f)}: `), f);
+  }
+  assert.deepEqual(readdirSync(outside), []);
+});
+
+test('mergeFixtures: a failed build leaves the previous fixtures in place', () => {
+  const sql = tmp();
+  write(sql, { 'ok.sql': 'CREATE TABLE t (a);', 'bad.sql': 'nope;' });
+  const parent = tmp();
+  const dest = join(parent, 'fixtures');
+  const h = mergeFixtures([], dest, { 'd.db': join(sql, 'ok.sql') });
+  // .next and .old left by a killed run are cleared; the swap leaves neither.
+  write(parent, { 'fixtures.next/junk': 'j', 'fixtures.old/junk': 'j' });
+  assert.equal(mergeFixtures([], dest, { 'd.db': join(sql, 'ok.sql') }), h);
+  assert.deepEqual(readdirSync(parent), ['fixtures']);
+  assert.deepEqual(readdirSync(dest), ['d.db']);
+  assert.throws(() => mergeFixtures([], dest, { 'd.db': join(sql, 'bad.sql') }), /sqlite fixture .*bad\.sql/);
+  assert.equal(mergeFixtures([], join(tmp(), 'cmp'), { 'd.db': join(sql, 'ok.sql') }), h);
+  const db = new DatabaseSync(join(dest, 'd.db'), { readOnly: true });
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name), ['t']);
+  db.close();
+  assert.deepEqual(readdirSync(parent), ['fixtures']);
+});
+
+test('podFile: rebuild keeps the saved fixtures and sqlite; --fixtures replaces both', () => {
+  const p = podOf(tmp(), 'dev');
+  write(names(p).dir, { 'pod.json': JSON.stringify({ fixtures: ['/fx'], sqlite: { 'a.db': '/c/a.sql' }, jar: 'j.jar' }) });
+  assert.deepEqual(podFile(p, { fixtures: [] }, true), { fixtures: ['/fx'], sqlite: { 'a.db': '/c/a.sql' }, jar: 'j.jar', heap: undefined });
+  assert.deepEqual(podFile(p, { fixtures: ['/other'], heap: '2G' }, true), { fixtures: ['/other'], jar: 'j.jar', heap: '2G' });
+  assert.deepEqual(podFile(p, { fixtures: [] }, false), { fixtures: [], sqlite: undefined, jar: undefined, heap: undefined });
 });
 
 test('parseBootReport finds the boot time, enabled plugins, failures and errors', () => {

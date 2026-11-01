@@ -13,7 +13,9 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
   up [--fixtures DIR]... [--jar NAME] [--heap SIZE]
                           build mc-dev:<project>-<imageHash> from the committed server/
                           and boot the pod; refuses uncommitted server/ changes
-  rebuild [same options]  rebuild from HEAD, then recreate container and volume
+  rebuild [same options]  rebuild from HEAD, then recreate container and volume;
+                          keeps the last boot's fixtures and sqlite databases
+                          (--fixtures replaces both)
   restart                 restart the container on the same image; state kept
   reset                   re-apply /fixtures on the next boot, then restart
   down [--all]            remove the pod (--all: every pod of this checkout)
@@ -125,7 +127,7 @@ export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: 
   for (const note of built.notes) say(`override: ${note}`);
   const n = names(p);
   for (const dir of [join(p.root, '.dev'), join(p.root, '.dev', 'pods'), n.dir]) privateDir(dir);
-  const fixturesHash = mergeFixtures(pf.fixtures, join(n.dir, 'fixtures'));
+  const fixturesHash = mergeFixtures(pf.fixtures, join(n.dir, 'fixtures'), pf.sqlite);
   if (replace) removePod(p, false, d);
   writeFileSync(join(n.dir, 'pod.json'), `${JSON.stringify(pf)}\n`, { mode: 0o600 });
   chmodSync(join(n.dir, 'pod.json'), 0o600);
@@ -148,10 +150,12 @@ function waitBoot(p: Pod, since: number, timeout: number | undefined): number {
   return secs;
 }
 
-// Options given on the command line win over the pod's saved ones.
-function podFile(p: Pod, o: Opts, saved: boolean): PodFile {
-  const prev = saved ? readPodFile(p) : { fixtures: [] };
-  return { fixtures: o.fixtures.length > 0 ? o.fixtures : prev.fixtures, jar: o.jar ?? prev.jar, heap: o.heap ?? prev.heap };
+// Options given on the command line win over the pod's saved ones; --fixtures
+// replaces the saved sqlite fixtures (from bin/check run --fresh) too.
+export function podFile(p: Pod, o: Pick<Opts, 'fixtures' | 'jar' | 'heap'>, saved: boolean): PodFile {
+  const prev: PodFile = saved ? readPodFile(p) : { fixtures: [] };
+  const fx = o.fixtures.length > 0 ? { fixtures: o.fixtures } : { fixtures: prev.fixtures, sqlite: prev.sqlite };
+  return { ...fx, jar: o.jar ?? prev.jar, heap: o.heap ?? prev.heap };
 }
 
 function main(argv: string[]) {
