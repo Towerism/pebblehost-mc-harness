@@ -14,6 +14,7 @@ const METRICS = 'metrics: no network in the pod';
 // Keys as they appear in the live copy's configs (2026-11-01).
 export const OVERRIDES: readonly Override[] = [
   { file: 'server.properties', key: 'online-mode', value: 'false', why: 'no Mojang session servers offline' },
+  { file: 'server.properties', key: 'server-port', value: '25565', why: 'the bot relay and the join proxy connect to 25565' },
   { file: 'config/paper-global.yml', key: 'update-checker.enabled', value: 'false', why: UPDATE },
   { file: 'bukkit.yml', key: 'settings.connection-throttle', value: '-1', why: 'bots join back to back from one address' },
   { file: 'plugins/bStats/config.yml', key: 'enabled', value: 'false', why: METRICS },
