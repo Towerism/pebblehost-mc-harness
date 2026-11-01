@@ -37,11 +37,24 @@ import assert from 'node:assert/strict';
 import { dev } from '#harness/dev';
 test('difficulty', async () => assert.match(await dev.console('difficulty'), /^The difficulty is /));
 EOF
+  # Runs after s-bot on the same pod: the suite made its bot leave.
   e2e s-list '{"kind":"e2e"}' <<'EOF'
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dev } from '#harness/dev';
-test('list', async () => assert.match(await dev.console('list'), /players online/));
+test('no player left over', async () => assert.match(await dev.console('list'), /^There are 0 of a max/));
+EOF
+  e2e s-bot '{"kind":"e2e","needs":["bot","console"]}' <<'EOF'
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { bot } from '#harness/bot';
+import { dev } from '#harness/dev';
+test('a bot joins and reads a reply; it is left joined on purpose', async () => {
+  const b = await bot.join('Botty');
+  assert.deepEqual(await bot.list(), ['Botty']);
+  await dev.console('say hello Botty');
+  assert.match(await b.waitMessage(/hello Botty/), /hello Botty/);
+});
 EOF
   e2e s-fail '{"kind":"e2e"}' <<'EOF'
 import { test } from 'node:test';
@@ -106,11 +119,11 @@ EOF
   [[ $output == *'dev.restart() needs "restart": true or "exclusive": true'* ]]
   # The data profile's second check sees no ban: the restart reset worked.
   [[ $output == *"PASS s-ban-a"* && $output == *"PASS s-ban-b"* ]]
-  for id in s-diff s-list s-fx1 s-fx2 s-restart; do [[ $output == *"PASS $id"* ]]; done
-  [[ $output == *"suite: 9 check(s), 1 failed or refused (s-fail); 3 pod(s)"* ]]
+  for id in s-bot s-diff s-list s-fx1 s-fx2 s-restart; do [[ $output == *"PASS $id"* ]]; done
+  [[ $output == *"suite: 10 check(s), 1 failed or refused (s-fail); 3 pod(s)"* ]]
   [[ $output == *"OVER BUDGET by"* ]]
   # The restart check runs last on its profile's pod.
-  [ "$(timing 't.profiles.map((p) => p.tests.map((x) => x.check).join(",")).join(" ")')" = 's-ban-a,s-ban-b s-diff,s-fail,s-list s-fx1,s-fx2,s-restart' ]
+  [ "$(timing 't.profiles.map((p) => p.tests.map((x) => x.check).join(",")).join(" ")')" = 's-ban-a,s-ban-b s-bot,s-diff,s-fail,s-list s-fx1,s-fx2,s-restart' ]
   [ "$(timing 't.profiles.map((p) => p.reset).join(",")')" = 'reset,none,restore' ]
   [ "$(timing 't.profiles.every((p) => p.boot > 0 && p.teardown > 0)')" = true ]
   [ "$(timing 't.image.cacheHit')" = false ]
