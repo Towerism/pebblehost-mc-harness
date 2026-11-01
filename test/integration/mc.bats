@@ -98,3 +98,17 @@ remote_sh() { docker exec -u "$SFTP_UID" -w /home/mc "$SFTP_CONTAINER" sh -c "$1
   [ "$status" -ne 0 ]
   [[ $output != *nope-secret* ]]
 }
+
+@test "an empty remote directory pulls as nothing, diffs as all-new, and takes a push" {
+  remote_sh "mkdir -p $dir/plugins/Empty"
+  run "$mc" pull "$dir/plugins/Empty"
+  [ "$status" -eq 0 ]
+  mkdir -p "$MC_HOME/server/$dir/plugins/Empty"
+  echo 'a: 1' >"$MC_HOME/server/$dir/plugins/Empty/new.yml"
+  run "$mc" diff "$dir/plugins/Empty"
+  [ "$status" -eq 1 ]
+  [[ $output == *"+a: 1"* ]]
+  run "$mc" push "$dir/plugins/Empty"
+  [ "$status" -eq 0 ]
+  [ "$(remote_sh "cat $dir/plugins/Empty/new.yml")" = "a: 1" ]
+}
