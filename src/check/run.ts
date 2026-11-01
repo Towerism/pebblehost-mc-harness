@@ -59,7 +59,10 @@ export function runCheck(o: RunOpts, d: Docker): Run {
   const hash = checkHash(o.root, o.id);
   const entries = readdirSync(join(o.root, 'checks', o.id), { withFileTypes: true });
   // Only the committed test files run (checkHash refused any other file).
-  const tests = git(o.root, ['ls-tree', `${hash}`]).stdout.split('\n').map((l) => /^\d+ blob \w+\t(.+\.test\.ts)$/.exec(l)?.[1]).filter((f): f is string => f !== undefined).sort();
+  // A committed symlink (mode 120000) would run or read code outside the check.
+  const links = git(o.root, ['ls-tree', '-r', hash]).stdout.split('\n').filter((l) => l.startsWith('120000 ')).map((l) => `checks/${o.id}/${l.split('\t')[1]}`);
+  if (links.length > 0) fail(`symlinks refused in checks/${o.id}: ${links.join(', ')}`);
+  const tests = git(o.root, ['ls-tree', `${hash}`]).stdout.split('\n').map((l) => /^100\d+ blob \w+\t(.+\.test\.ts)$/.exec(l)?.[1]).filter((f): f is string => f !== undefined).sort();
   if (tests.length === 0) fail(`checks/${o.id} has no *.test.ts`);
   // A bare-text check is its test files and profile.json; anything else (a
   // package.json, a helper module, a directory) could change what it runs.
