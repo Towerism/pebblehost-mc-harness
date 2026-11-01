@@ -4,6 +4,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
 import { applyOverrides } from './overrides.ts';
@@ -22,13 +23,15 @@ export type Identity = { source: 'archive' | 'dir'; commit: string; tree: string
 
 const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
 
-export function git(root: string, args: string[]): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 30, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
+// Every harness git call ignores replace refs (git replace), which would make
+// a commit's tree read as other bytes.
+export function git(root: string, args: string[], opts: { env?: Record<string, string>; input?: string } = {}): { status: number; stdout: string; stderr: string } {
+  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 30, input: opts.input, env: { ...process.env, ...opts.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   return { status: r.status ?? 2, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
-function mustGit(root: string, args: string[]): string {
-  const r = git(root, args);
+function mustGit(root: string, args: string[], opts: { env?: Record<string, string>; input?: string } = {}): string {
+  const r = git(root, args, opts);
   if (r.status !== 0) fail(`git ${args.join(' ')} failed: ${r.stderr.trim()}`);
   return r.stdout.trim();
 }
@@ -45,6 +48,23 @@ export function walk(dir: string, rel = ''): string[] {
     else if (st.isFile()) out.push(path);
   }
   return out;
+}
+
+// The git tree id of dir's files by mode and raw bytes (no filters), built
+// in a throwaway index.
+export function treeOf(root: string, dir: string): string {
+  const files = walk(dir);
+  if (files.some((f) => f.includes('\n'))) fail(`a file name with a newline in ${dir}`);
+  const tmp = mkdtempSync(join(tmpdir(), 'mc-tree-'));
+  try {
+    const env = { GIT_INDEX_FILE: join(tmp, 'index') };
+    const blobs = files.length === 0 ? [] : mustGit(root, ['hash-object', '--no-filters', '--stdin-paths'], { input: `${files.map((f) => join(dir, f)).join('\n')}\n` }).split('\n');
+    const info = files.map((f, i) => `${statSync(join(dir, f)).mode & 0o100 ? '100755' : '100644'} ${blobs[i]}\t${f}`).join('\n');
+    mustGit(root, ['update-index', '--index-info'], { env, input: `${info}\n` });
+    return mustGit(root, ['write-tree', '--missing-ok'], { env });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 // sha256 over every file's path, mode and content.
@@ -141,6 +161,11 @@ export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROO
     if (tar.status !== 0) fail(`tar failed: ${tar.stderr}`);
     rmSync(join(ctx, 'server.tar'));
     base = join(ctx, 'server');
+    // git archive applies export-ignore and export-subst from .gitattributes
+    // and .git/info/attributes: the extracted bytes must still be the tree.
+    const want = mustGit(src.root, ['rev-parse', `${src.commit}:server`]);
+    const got = treeOf(src.root, base);
+    if (got !== want) fail(`git archive of server/ at ${src.commit.slice(0, 12)} is not its tree (${got.slice(0, 12)}, not ${want.slice(0, 12)}): check export-ignore or export-subst in .gitattributes or .git/info/attributes`);
   } else {
     base = join(src.root, 'server');
   }
