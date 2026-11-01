@@ -99,9 +99,27 @@ function isBin(rel: string): boolean {
   return ['libraries', 'versions', 'cache'].includes(top) || rel.toLowerCase().endsWith('.jar');
 }
 
-// Lay out ctx/{bin,cfg,ovr} plus the Dockerfile and entrypoint. Returns the
-// server jar: the one *.jar at the server root.
-export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROOT): { jar: string; notes: string[] } {
+// The *.jar files at the server root, sorted.
+export function rootJars(src: Source): string[] {
+  const names = src.kind === 'git' ? mustGit(src.root, ['ls-tree', '--name-only', src.commit, 'server/']).split('\n').map((p) => p.slice('server/'.length)) : readdirSync(join(src.root, 'server'));
+  return names.filter((f) => f.toLowerCase().endsWith('.jar')).sort();
+}
+
+// Which root jar the server runs: `wanted` (bin/dev --jar), else the only
+// one. Hosts like PebbleHost pick the jar outside the files, so a tree with
+// several needs --jar.
+export function chooseJar(src: Source, wanted?: string): string {
+  const jars = rootJars(src);
+  if (wanted !== undefined) {
+    if (!jars.includes(wanted)) fail(`--jar ${wanted} is not a jar at the server/ root (found: ${jars.join(', ') || 'none'})`);
+    return wanted;
+  }
+  if (jars.length !== 1) fail(`server/ has ${jars.length ? `${jars.length} root jars (${jars.join(', ')}); pick one with --jar NAME` : 'no *.jar at its root'}`);
+  return jars[0];
+}
+
+// Lay out ctx/{bin,cfg,ovr} plus the Dockerfile and entrypoint.
+export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROOT): { notes: string[] } {
   for (const d of ['bin', 'cfg', 'ovr']) mkdirSync(join(ctx, d), { recursive: true });
   let base: string;
   if (src.kind === 'git') {
@@ -124,16 +142,14 @@ export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROO
   if (src.kind === 'git') rmSync(base, { recursive: true, force: true });
   const notes: string[] = [];
   for (const a of applyOverrides(join(ctx, 'cfg'))) {
-    notes.push(a.note);
-    if (a.content === null) continue;
+    notes.push(...a.notes);
+    if (a.content === null || a.set === 0) continue;
     mkdirSync(dirname(join(ctx, 'ovr', a.file)), { recursive: true });
     writeFileSync(join(ctx, 'ovr', a.file), a.content);
   }
   cpSync(join(harnessRoot, 'docker/server.Dockerfile'), join(ctx, 'Dockerfile'));
   cpSync(join(harnessRoot, 'docker/entrypoint.sh'), join(ctx, 'entrypoint.sh'));
-  const jars = readdirSync(join(ctx, 'bin')).filter((f) => f.toLowerCase().endsWith('.jar'));
-  if (jars.length !== 1) fail(`server/ needs exactly one *.jar at its root, found ${jars.length ? jars.join(', ') : 'none'}`);
-  return { jar: jars[0], notes };
+  return { notes };
 }
 
 // Whether the build output shows the step running `step` taken from cache:
@@ -155,9 +171,9 @@ export function build(src: Source, d: Docker, project: string, harnessRoot = HAR
   if (d(['image', 'inspect', tag]).status === 0) return { tag, id, cacheHit: true, jarLayerCached: true, notes: [] };
   const ctx = mkdtempSync(join(privateDir(join(src.root, '.dev')), 'build-'));
   try {
-    const { jar, notes } = buildContext(src, ctx, harnessRoot);
+    const { notes } = buildContext(src, ctx, harnessRoot);
     const labels = { source: id.source, commit: id.commit, tree: id.tree, harness: id.harness, image: id.image, project };
-    const args = ['build', '-f', join(ctx, 'Dockerfile'), '--build-arg', `MC_JAR=${jar}`, '-t', tag];
+    const args = ['build', '-f', join(ctx, 'Dockerfile'), '-t', tag];
     for (const [k, v] of Object.entries(labels)) args.push('--label', `mc-harness.${k}=${v}`);
     const r = d([...args, ctx]);
     if (r.status !== 0) fail(`docker build failed:\n${(r.stdout + r.stderr).split('\n').slice(-30).join('\n')}`);
