@@ -5,10 +5,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail } from '../dev/docker.ts';
 import { HARNESS_ROOT, labels } from '../dev/image.ts';
-import { isExplored, names, podOf, state } from '../dev/pod.ts';
+import { isExplored, names, podOf, RUN_LOG, state } from '../dev/pod.ts';
 import { parseBareText } from '../gate/bareText.ts';
 import { writeDoc } from '../gate/docs.ts';
-import { confirmOf, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
+import { confirmCheck, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
 import { issueOf, readRecords, runsFile, type Kind, type RunRecord } from './record.ts';
 import { readProfile, runCheck } from './run.ts';
 
@@ -112,11 +112,18 @@ function main(argv: string[]) {
         const server = names(p).server;
         if (state(d, server) !== 'running' || labels(d, server)['mc-harness.image'] !== v.green.imageHash) fail(`gate: no running pod ${o.pod} booted from the green's image ${short(v.green.imageHash)}; run bin/dev rebuild first`);
         if (isExplored(p, d)) fail(`gate: pod ${o.pod}'s volume was explored (bin/dev console or join); run bin/dev rebuild first`);
+        // Only the next run after the green on its volume, or the first on a
+        // new one, can confirm; refuse before running anything that won't.
+        const log = d(['exec', server, 'cat', RUN_LOG]);
+        const runs = log.status === 0 ? log.stdout.split('\n').filter(Boolean).length : 0;
+        const slot = labels(d, server)['mc-harness.generation'] === v.green.generation ? v.green.runIndex + 1 : 0;
+        if (runs !== slot) fail(`gate: pod ${o.pod}'s volume has ${runs} check run(s); a confirm must be run ${slot} on it; run bin/dev rebuild first (rebuild before each green and each gate)`);
       }
       const { record, output } = runCheck({ root, id: o.id, issue, pod: o.pod, fresh: false, confirm: true, timeoutS: o.timeout }, d);
       process.stdout.write(output.endsWith('\n') || output === '' ? output : `${output}\n`);
       if (!record.pass) fail(`gate: the confirm run of ${o.id} failed; the green does not hold`);
-      if (JSON.stringify(confirmOf(readRecords(root, issue), v.green)) !== JSON.stringify(record)) fail(`gate: the confirm run of ${o.id} does not match the green (fixtures, image or an explored volume)`);
+      const judged = confirmCheck(readRecords(root, issue), v.green);
+      if (JSON.stringify(judged.confirm) !== JSON.stringify(record)) fail(`gate: the confirm run of ${o.id} does not count: ${judged.why}`);
       say(`gate: ${o.id} passed and confirmed; the confirm run is recorded in ${runsFile(root, issue)}: commit it`);
       break;
     }
@@ -125,8 +132,8 @@ function main(argv: string[]) {
       const records = readRecords(root, issue);
       const v = verdict(root, o.id, issue, records);
       if (!v.ok) fail(`${cmd}: the gate refuses ${o.id}:\n  ${v.reasons.join('\n  ')}`);
-      const confirm = confirmOf(records, v.green);
-      if (!confirm) fail(`${cmd}: the green of ${o.id} has no passing latest confirm run; run bin/check gate ${o.id}`);
+      const { confirm, why } = confirmCheck(records, v.green);
+      if (!confirm) fail(`${cmd}: the green of ${o.id} is not confirmed (${why}); run bin/dev rebuild, then bin/check gate ${o.id}`);
       if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${o.id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
       say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm)}`);
       break;

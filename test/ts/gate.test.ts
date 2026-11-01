@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import type { RunRecord } from '../../src/check/record.ts';
 import { bareTextProblems, literalProblems, parseBareText } from '../../src/gate/bareText.ts';
-import { confirmOf, evaluate, type GateCheck, type GateRepo } from '../../src/gate/gate.ts';
+import { confirmCheck, confirmOf, evaluate, type GateCheck, type GateRepo } from '../../src/gate/gate.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const c = (n: string) => n.repeat(40);
@@ -45,7 +45,7 @@ function rec(o: Partial<RunRecord>): RunRecord {
   const treeHash = o.treeHash ?? TREE[commit];
   const harnessHash = o.harnessHash ?? 'h1';
   const time = o.pass ? '2026-11-01T00:00:02Z' : '2026-11-01T00:00:01Z';
-  return { check: '7-x', issue: 7, kind: 'e2e', target: 'dev', pass: false, time, source: 'archive', commit, treeHash, harnessHash, imageHash: sha(`${treeHash}\n${harnessHash}`), fixturesHash: 'f1', checkHash: 'k1', generation: 'g1', fresh: true, explored: false, containerId: 'c', runIndex: 0, toolHash: 'tool1', confirm: false, output: '', ...o, ...(o.imageHash ? {} : { imageHash: sha(`${treeHash}\n${harnessHash}`) }) };
+  return { check: '7-x', issue: 7, kind: 'e2e', target: 'dev', pass: false, time, source: 'archive', commit, treeHash, harnessHash, imageHash: sha(`${treeHash}\n${harnessHash}`), fixturesHash: 'f1', checkHash: 'k1', generation: 'g1', fresh: true, explored: false, containerId: 'c', runIndex: 0, concurrent: false, toolHash: 'tool1', confirm: false, output: '', ...o, ...(o.imageHash ? {} : { imageHash: sha(`${treeHash}\n${harnessHash}`) }) };
 }
 
 const red = rec({});
@@ -101,6 +101,9 @@ test('refusal cases of the gate table', () => {
   // Another check (or anything) ran on the volume first and could have changed it.
   refused([{ ...red, runIndex: 1 }, green], /^G9: the red was run 1 check run\(s\) into its volume g1/);
   refused([red, { ...green, runIndex: 2 }], /^G9: the green was run 2 check run\(s\) into its volume g2/);
+  // Two runs on one volume at once: the later one sees the other's line.
+  refused([{ ...red, concurrent: true }, green], /^G9: another run was logged on the red's volume g1 while it ran/);
+  refused([red, { ...green, concurrent: true }], /^G9: another run was logged on the green's volume g2 while it ran/);
   // Uncommitted or different check and gate code between red and green.
   refused([red, { ...green, toolHash: 'tool2' }], /^G5: red and green ran different check or gate code/);
   // A server change committed after the green never ran.
@@ -138,6 +141,11 @@ test('the latest confirm run of the green decides', () => {
   assert.equal(confirmOf([red, green, { ...next, runIndex: 2 }], green), undefined);
   assert.equal(confirmOf([red, green, { ...ok, runIndex: 1 }], green), undefined);
   assert.equal(confirmOf([red, green, { ...ok, time: green.time }], green), undefined);
+  assert.equal(confirmOf([red, green, { ...ok, concurrent: true }], green), undefined);
+  // Each refusal names its reason.
+  const whys: [Partial<RunRecord>, RegExp][] = [[{ pass: false }, /failed/], [{ explored: true }, /explored/], [{ concurrent: true }, /alongside/], [{ fixturesHash: 'f2' }, /other fixtures/], [{ generation: 'g2', runIndex: 2 }, /was run 2 on its volume, not 1/]];
+  for (const [o, re] of whys) assert.match(confirmCheck([red, green, { ...ok, ...o }], green).why, re);
+  assert.match(confirmCheck([red, green], green).why, /no confirm run/);
   assert.equal(confirmOf([red, green, ok], green), ok);
   assert.equal(confirmOf([red, green, ok, { ...ok, pass: false }], green), undefined);
   assert.equal(confirmOf([red, green, { ...ok, pass: false }, ok], green), ok);

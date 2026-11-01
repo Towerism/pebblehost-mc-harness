@@ -59,6 +59,7 @@ export function pairProblems(red: RunRecord, green: RunRecord, c: GateCheck, rep
     }
     if (red.harnessHash !== green.harnessHash) out.push(`G5: red and green ran different harness code (${short(red.harnessHash)}, ${short(green.harnessHash)})`);
     for (const [name, r] of both) if (r.runIndex !== 0) out.push(`G9: the ${name} was run ${r.runIndex} check run(s) into its volume ${short(r.generation)}; only the first run on a volume counts`);
+    for (const [name, r] of both) if (r.concurrent) out.push(`G9: another run was logged on the ${name}'s volume ${short(r.generation)} while it ran`);
     if (red.fixturesHash !== green.fixturesHash) out.push('G6: the fixtures changed between red and green');
     if (!red.fresh) out.push(`G9: the red ran on volume ${short(red.generation)}, which bin/check run --fresh did not make`);
     for (const [name, r] of both) if (r.explored) out.push(`G9: the ${name}'s volume ${short(r.generation)} was explored (bin/dev console or join) before the run`);
@@ -94,17 +95,29 @@ export function evaluate(records: RunRecord[], c: GateCheck, repo: GateRepo): Ve
 }
 
 // The latest confirm run of this green decides: it must pass, after the
-// green, on the green's image and fixtures, on a volume nobody explored, and
-// as the next run on the green's volume (nothing else in between) or the
-// first run on a new one. A later failing confirm cancels an earlier pass.
-export function confirmOf(records: RunRecord[], green: RunRecord): RunRecord | undefined {
+// green, on the green's image and fixtures, on a volume nobody explored, with
+// no run alongside, and as the next run on the green's volume (nothing else
+// in between) or the first run on a new one. A later failing confirm cancels
+// an earlier pass. `why` names what disqualifies it.
+export function confirmCheck(records: RunRecord[], green: RunRecord): { confirm?: RunRecord; why: string } {
   const at = records.findIndex((r) => JSON.stringify(r) === JSON.stringify(green));
-  if (at < 0) return undefined;
+  if (at < 0) return { why: 'the green is not in the records' };
   const mine = records.slice(at + 1).filter((r) => r.confirm && r.check === green.check && r.issue === green.issue && r.checkHash === green.checkHash && r.imageHash === green.imageHash && r.treeHash === green.treeHash);
   const last = mine.at(-1);
-  if (!last || !last.pass || last.explored || last.fixturesHash !== green.fixturesHash || !(last.time > green.time)) return undefined;
-  if (green.kind === 'e2e' && last.runIndex !== (last.generation === green.generation ? green.runIndex + 1 : 0)) return undefined;
-  return last;
+  if (!last) return { why: 'no confirm run on the green\'s image' };
+  const slot = green.kind === 'e2e' && last.generation === green.generation ? green.runIndex + 1 : 0;
+  const why = !last.pass ? 'the latest confirm run failed'
+    : last.explored ? 'the latest confirm ran on an explored volume'
+    : last.concurrent ? 'another run was logged alongside the latest confirm'
+    : last.fixturesHash !== green.fixturesHash ? 'the latest confirm ran with other fixtures'
+    : !(last.time > green.time) ? 'the latest confirm is not newer than the green'
+    : green.kind === 'e2e' && last.runIndex !== slot ? `the latest confirm was run ${last.runIndex} on its volume, not ${slot}`
+    : '';
+  return why ? { why } : { confirm: last, why };
+}
+
+export function confirmOf(records: RunRecord[], green: RunRecord): RunRecord | undefined {
+  return confirmCheck(records, green).confirm;
 }
 
 export function gitRepo(root: string): GateRepo {

@@ -33,7 +33,7 @@ test('bare-text red, fix, green, committed records, gate with its confirm run, t
   assert.match(r.stdout, /passed, not confirmed/);
   r = check(root, {}, 'runbook', '3-crate');
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /the green of 3-crate has no passing latest confirm run; run bin\/check gate 3-crate/);
+  assert.match(r.stderr, /the green of 3-crate is not confirmed \(no confirm run on the green's image\); run bin\/dev rebuild, then bin\/check gate 3-crate/);
   r = check(root, {}, 'gate', '3-crate');
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /gate: 3-crate passed and confirmed; the confirm run is recorded in .*: commit it/);

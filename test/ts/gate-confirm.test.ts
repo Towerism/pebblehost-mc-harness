@@ -21,7 +21,7 @@ test('the e2e confirm run needs the green image running on an unexplored volume 
   commit(root, { 'server/config.yml': "crate:\n  name: 'Fixed'\n" });
   const b = rev('HEAD');
   const ident = (c: string) => ({ commit: c, treeHash: rev(`${c}:server`), harnessHash: 'h1', imageHash: createHash('sha256').update(`${rev(`${c}:server`)}\nh1`).digest('hex') });
-  const base = { check: '3-motd', issue: 3, kind: 'e2e', target: 'dev', source: 'archive', fixturesHash: 'f1', checkHash: rev('HEAD:checks/3-motd'), containerId: 'c', runIndex: 0, toolHash: 'tool1', confirm: false, output: '' };
+  const base = { check: '3-motd', issue: 3, kind: 'e2e', target: 'dev', source: 'archive', fixturesHash: 'f1', checkHash: rev('HEAD:checks/3-motd'), containerId: 'c', runIndex: 0, concurrent: false, toolHash: 'tool1', confirm: false, output: '' };
   write(root, { '.verify/runs/issue-3.jsonl': `${JSON.stringify({ ...base, ...ident(a), time: '2026-01-01T00:00:01Z', pass: false, generation: 'g1', fresh: true, explored: false })}\n${JSON.stringify({ ...base, ...ident(b), time: '2026-01-01T00:00:02Z', pass: true, generation: 'g2', fresh: false, explored: false })}\n` });
   records(root);
   const green = ident(b);
@@ -38,17 +38,32 @@ test('the e2e confirm run needs the green image running on an unexplored volume 
   r = check(root, { FAKE_LABELS: JSON.stringify(labels), FAKE_REPLY: '{"ok":true,"reply":"The difficulty is Easy"}' }, 'gate', '3-motd');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /the confirm run of 3-motd failed/);
-  r = check(root, { FAKE_LABELS: JSON.stringify({ ...labels, 'mc-harness.fixtures': 'f2' }), FAKE_REPLY: normal }, 'gate', '3-motd');
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /the confirm run of 3-motd does not match the green/);
-  // Those failed confirms were runs on this volume: a confirm after them is
-  // not the next run after the green. A rebuilt pod (a new volume) is.
+  // That failed confirm was a run on this volume: the next confirm is refused
+  // before it runs, and nothing is recorded.
+  const before = readRecords(root, 3).length;
   r = check(root, { FAKE_LABELS: JSON.stringify(labels), FAKE_REPLY: normal }, 'gate', '3-motd');
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /the confirm run of 3-motd does not match the green/);
+  assert.match(r.stderr, /pod dev's volume has 1 check run\(s\); a confirm must be run 0 on it; run bin\/dev rebuild first \(rebuild before each green and each gate\)/);
+  assert.equal(readRecords(root, 3).length, before);
+  // A rebuilt pod (a new volume) whose fixtures differ: run, then named.
   git(root, 'clean', '-qfx', 'fakefs');
-  r = check(root, { FAKE_LABELS: JSON.stringify({ ...labels, 'mc-harness.generation': 'gen-new' }), FAKE_REPLY: normal }, 'gate', '3-motd');
+  r = check(root, { FAKE_LABELS: JSON.stringify({ ...labels, 'mc-harness.fixtures': 'f2' }), FAKE_REPLY: normal }, 'gate', '3-motd');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /the confirm run of 3-motd does not count: the latest confirm ran with other fixtures/);
+  git(root, 'clean', '-qfx', 'fakefs');
+  const fresh = JSON.stringify({ ...labels, 'mc-harness.generation': 'gen-new' });
+  r = check(root, { FAKE_LABELS: fresh, FAKE_REPLY: normal }, 'gate', '3-motd');
   assert.equal(r.status, 0, r.stderr);
-  const last = readRecords(root, 3).at(-1);
+  const confirmed = readRecords(root, 3);
+  const last = confirmed.at(-1);
   assert.deepEqual([last?.confirm, last?.pass, last?.imageHash, last?.explored, last?.runIndex], [true, true, green.imageHash, false, 0]);
+  // A second gate on the same pod would be run 1 there: refused cleanly,
+  // nothing recorded, and the first confirm still stands.
+  r = check(root, { FAKE_LABELS: fresh, FAKE_REPLY: normal }, 'gate', '3-motd');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /a confirm must be run 0 on it; run bin\/dev rebuild first/);
+  assert.deepEqual(readRecords(root, 3), confirmed);
+  records(root);
+  r = check(root, {}, 'postmortem', '3-motd');
+  assert.equal(r.status, 0, r.stderr);
 });
