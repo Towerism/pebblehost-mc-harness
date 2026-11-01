@@ -2,11 +2,11 @@
 // Exit 0 ok (a check that passed), 1 a check that failed (recorded), 2
 // refused or failed to run. Never prompts.
 import { spawn } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail } from '../dev/docker.ts';
-import { HARNESS_ROOT, labels } from '../dev/image.ts';
-import { isExplored, names, podOf, RUN_LOG, state } from '../dev/pod.ts';
+import { HARNESS_ROOT, labels, privateDir } from '../dev/image.ts';
+import { isExplored, killOrphanSuite, names, podOf, RUN_LOG, state, suitePidFile } from '../dev/pod.ts';
 import { parseBareText } from '../gate/bareText.ts';
 import { writeDoc } from '../gate/docs.ts';
 import { confirmCheck, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
@@ -93,7 +93,13 @@ function verdict(root: string, id: string, issue: number, records: RunRecord[]):
 }
 
 function suiteParent(root: string, argv: string[]): void {
-  const child = spawn(process.execPath, [import.meta.filename, ...argv], { stdio: 'inherit', detached: true, env: { ...process.env, MC_SUITE_CHILD: '1' } });
+  // A suite whose parent was SIGKILLed can leave its child and pods behind.
+  if (killOrphanSuite(root)) say('suite: stopped an orphaned suite run');
+  const left = teardownSuitePods(root, d);
+  if (left > 0) say(`suite: removed ${left} leftover suite resource(s)`);
+  const child = spawn(process.execPath, [import.meta.filename, ...argv], { stdio: 'inherit', detached: true, env: { ...process.env, MC_HOME: root, MC_SUITE_CHILD: '1' } });
+  privateDir(join(root, '.dev'));
+  writeFileSync(suitePidFile(root), `${child.pid}\n`, { mode: 0o600 });
   let signal: NodeJS.Signals | null = null;
   const stop = (sig: NodeJS.Signals) => {
     if (signal) return;
@@ -108,6 +114,7 @@ function suiteParent(root: string, argv: string[]): void {
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
   child.on('exit', (code) => {
+    rmSync(suitePidFile(root), { force: true });
     if (signal === null) process.exit(code ?? 2);
     // A docker call the kill cut short can still finish creating its
     // resource a moment later: sweep again until a pass finds nothing.
