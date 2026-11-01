@@ -19,9 +19,11 @@ const H = c('e');
 const X = c('f');
 const HB = c('1');
 const N = c('2');
-const PARENT: Record<string, string> = { [B]: A, [D]: B, [HB]: B, [H]: A, [X]: A, [N]: A };
-const TREE: Record<string, string> = { [A]: 'tA', [B]: 'tB', [D]: 'tB', [HB]: 'tB', [H]: 'tA', [X]: 'tA', [N]: 'tN' };
-const FILES: Record<string, string[]> = { tA: [], tB: ['config.yml'], tN: ['other.yml'] };
+const U = c('3');
+// U: an untested server change committed after the green.
+const PARENT: Record<string, string> = { [B]: A, [D]: B, [HB]: B, [H]: A, [X]: A, [N]: A, [U]: B };
+const TREE: Record<string, string> = { [A]: 'tA', [B]: 'tB', [D]: 'tB', [HB]: 'tB', [H]: 'tA', [X]: 'tA', [N]: 'tN', [U]: 'tU' };
+const FILES: Record<string, string[]> = { tA: [], tB: ['config.yml'], tN: ['other.yml'], tU: ['config.yml', 'untested.yml'] };
 
 // committed: the records at HEAD's .verify/runs/issue-7.jsonl; by default
 // whatever the test passes to evaluate.
@@ -42,7 +44,8 @@ function rec(o: Partial<RunRecord>): RunRecord {
   const commit = o.commit ?? A;
   const treeHash = o.treeHash ?? TREE[commit];
   const harnessHash = o.harnessHash ?? 'h1';
-  return { check: '7-x', issue: 7, kind: 'e2e', target: 'dev', pass: false, time: '2026-11-01T00:00:00Z', source: 'archive', commit, treeHash, harnessHash, imageHash: sha(`${treeHash}\n${harnessHash}`), fixturesHash: 'f1', checkHash: 'k1', generation: 'g1', fresh: true, explored: false, containerId: 'c', confirm: false, output: '', ...o, ...(o.imageHash ? {} : { imageHash: sha(`${treeHash}\n${harnessHash}`) }) };
+  const time = o.pass ? '2026-11-01T00:00:02Z' : '2026-11-01T00:00:01Z';
+  return { check: '7-x', issue: 7, kind: 'e2e', target: 'dev', pass: false, time, source: 'archive', commit, treeHash, harnessHash, imageHash: sha(`${treeHash}\n${harnessHash}`), fixturesHash: 'f1', checkHash: 'k1', generation: 'g1', fresh: true, explored: false, containerId: 'c', runIndex: 0, toolHash: 'tool1', confirm: false, output: '', ...o, ...(o.imageHash ? {} : { imageHash: sha(`${treeHash}\n${harnessHash}`) }) };
 }
 
 const red = rec({});
@@ -93,6 +96,15 @@ test('refusal cases of the gate table', () => {
   // Records edited or never committed: HEAD's file must hold them byte for byte.
   refused([red, green], /^G10: the green record is not committed as is/, { committed: [red] });
   refused([red, green], /^G10: the red record is not committed as is/, { committed: [{ ...red, pass: true }, green] });
+  // The red recorded after the green.
+  refused([{ ...red, time: '2026-11-01T00:00:03Z' }, green], /^G1: the red \(.*\) is not older than the green/);
+  // Another check (or anything) ran on the volume first and could have changed it.
+  refused([{ ...red, runIndex: 1 }, green], /^G9: the red was run 1 check run\(s\) into its volume g1/);
+  refused([red, { ...green, runIndex: 2 }], /^G9: the green was run 2 check run\(s\) into its volume g2/);
+  // Uncommitted or different check and gate code between red and green.
+  refused([red, { ...green, toolHash: 'tool2' }], /^G5: red and green ran different check or gate code/);
+  // A server change committed after the green never ran.
+  refused([red, green], /^G7: server\/ changed after the green, untested: config\.yml, untested\.yml/, { head: U });
 });
 
 test('a valid pair stays valid after a later harness bump and after reds that do not count', () => {
@@ -109,7 +121,7 @@ test('a valid pair stays valid after a later harness bump and after reds that do
 
 test('bare-text pairs skip the image, fixture and volume rules but need the static check and a fix to the file read', () => {
   const bred = rec({ kind: 'bare-text', source: 'head', imageHash: 'none', harnessHash: '', fixturesHash: '', generation: '', fresh: false });
-  const bgreen = { ...bred, pass: true, commit: B, treeHash: 'tB' };
+  const bgreen = { ...bred, pass: true, commit: B, treeHash: 'tB', time: green.time };
   const bare: GateCheck = { id: '7-x', issue: 7, kind: 'bare-text', staticProblems: [], bareFiles: ['config.yml'] };
   assert.equal(judge([bred, bgreen], {}, bare).ok, true);
   refused([bred, bgreen], /^G8: crate\.test\.ts: literal "<red>Vote"/, {}, { ...bare, staticProblems: ['crate.test.ts: literal "<red>Vote" holds a <tag>'] });
@@ -119,7 +131,13 @@ test('bare-text pairs skip the image, fixture and volume rules but need the stat
 });
 
 test('the latest confirm run of the green decides', () => {
-  const ok = { ...green, confirm: true, generation: 'g3' };
+  const ok = { ...green, confirm: true, generation: 'g3', time: '2026-11-01T00:00:09Z' };
+  // On the green's own volume, only as the very next run.
+  const next = { ...ok, generation: 'g2', runIndex: 1 };
+  assert.equal(confirmOf([red, green, next], green), next);
+  assert.equal(confirmOf([red, green, { ...next, runIndex: 2 }], green), undefined);
+  assert.equal(confirmOf([red, green, { ...ok, runIndex: 1 }], green), undefined);
+  assert.equal(confirmOf([red, green, { ...ok, time: green.time }], green), undefined);
   assert.equal(confirmOf([red, green, ok], green), ok);
   assert.equal(confirmOf([red, green, ok, { ...ok, pass: false }], green), undefined);
   assert.equal(confirmOf([red, green, { ...ok, pass: false }, ok], green), ok);

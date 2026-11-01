@@ -38,6 +38,11 @@ test('bare-text red, fix, green, committed records, gate with its confirm run, t
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /gate: 3-crate passed and confirmed; the confirm run is recorded in .*: commit it/);
   assert.deepEqual(readRecords(root, 3).map((x) => [x.pass, x.confirm]), [[false, false], [true, false], [true, true]]);
+  // The confirm record must be committed too before any doc is written.
+  r = check(root, {}, 'postmortem', '3-crate');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /the confirm record of 3-crate is not committed as is in \.verify\/runs\/issue-3\.jsonl; commit it first \(G10\)/);
+  records(root);
   r = check(root, {}, 'postmortem', '3-crate');
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /docs\/postmortems\/\d{4}-\d\d-\d\d-3-crate\.md/);
@@ -52,9 +57,11 @@ test('bare-text red, fix, green, committed records, gate with its confirm run, t
   const rb = readFileSync(r.stdout.trim().replace(/^runbook: wrote /, ''), 'utf8');
   for (const part of ['bin/dev sync', '   - `config.yml`', '   - `old.yml` (deleted', 'bin/check runbook push 3', 'bin/check run 3-crate --target live --issue 3']) assert.ok(rb.includes(part), part);
   assert.ok(rb.indexOf('bin/dev sync') < rb.indexOf('runbook push') && rb.indexOf('runbook push') < rb.indexOf('--target live'));
-  // A later failing confirm cancels the earlier pass.
-  commit(root, { 'server/config.yml': "crate:\n  name: 'Broken'\n" });
-  r = check(root, {}, 'gate', '3-crate');
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /the confirm run of 3-crate failed/);
+  // A server change committed after the green never ran: gate and docs refuse.
+  commit(root, { 'server/untested.yml': 'x: 1\n' });
+  for (const cmd of ['gate', 'postmortem', 'runbook']) {
+    r = check(root, {}, cmd, '3-crate');
+    assert.equal(r.status, 2, cmd);
+    assert.match(r.stderr, /G7: server\/ changed after the green, untested: untested\.yml/, cmd);
+  }
 });

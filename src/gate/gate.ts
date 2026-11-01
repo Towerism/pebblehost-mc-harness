@@ -1,9 +1,10 @@
 // The red→green gate (G1–G10): a failing and a later passing run of the same
 // committed check for issue N, where the green booted a strict descendant
-// commit whose server/ change the check depends on, both runs used the same
-// committed harness and fixtures, neither ran on a volume a human touched,
-// the red's volume was fresh, and both records are committed. Pure over the
-// records and a GateRepo, so the unit tests can drive every refusal.
+// commit whose server/ change the check depends on, nothing in server/ or the
+// check changed after it, both runs used the same committed harness, check
+// code and fixtures, each was the first run on a volume nobody touched by
+// hand, the red's volume was fresh, and both records are committed. Pure over
+// the records and a GateRepo, so the unit tests can drive every refusal.
 import { createHash } from 'node:crypto';
 import { git } from '../dev/image.ts';
 import type { Kind, RunRecord } from '../check/record.ts';
@@ -40,6 +41,7 @@ export function pairProblems(red: RunRecord, green: RunRecord, c: GateCheck, rep
     if (r.target !== 'dev' || r.kind !== c.kind) out.push(`G1: the ${name} run is ${r.target}/${r.kind}, not dev/${c.kind}`);
     if (r.issue !== c.issue) out.push(`G1: the ${name} record belongs to issue ${r.issue}, not ${c.issue}`);
   }
+  if (!(red.time < green.time)) out.push(`G1: the red (${red.time}) is not older than the green (${green.time})`);
   const head = repo.head();
   const atHead = repo.checkHashAt(head, c.id);
   if (red.checkHash !== green.checkHash || green.checkHash !== atHead) out.push(`G2: the check changed: red ${short(red.checkHash)}, green ${short(green.checkHash)}, HEAD ${short(atHead ?? '')}; run it red again`);
@@ -56,11 +58,17 @@ export function pairProblems(red: RunRecord, green: RunRecord, c: GateCheck, rep
       else if (r.treeHash !== repo.serverTree(r.commit) || r.imageHash !== sha256(`${r.treeHash}\n${r.harnessHash}`)) out.push(`G5: the ${name} record's tree or image hash does not match commit ${short(r.commit)}`);
     }
     if (red.harnessHash !== green.harnessHash) out.push(`G5: red and green ran different harness code (${short(red.harnessHash)}, ${short(green.harnessHash)})`);
+    for (const [name, r] of both) if (r.runIndex !== 0) out.push(`G9: the ${name} was run ${r.runIndex} check run(s) into its volume ${short(r.generation)}; only the first run on a volume counts`);
     if (red.fixturesHash !== green.fixturesHash) out.push('G6: the fixtures changed between red and green');
     if (!red.fresh) out.push(`G9: the red ran on volume ${short(red.generation)}, which bin/check run --fresh did not make`);
     for (const [name, r] of both) if (r.explored) out.push(`G9: the ${name}'s volume ${short(r.generation)} was explored (bin/dev console or join) before the run`);
   }
+  if (red.toolHash !== green.toolHash) out.push(`G5: red and green ran different check or gate code (${short(red.toolHash)}, ${short(green.toolHash)})`);
   if (!repo.isAncestor(green.commit, head)) out.push(`G7: HEAD does not descend from the green's ${short(green.commit)}`);
+  else {
+    const after = repo.serverChanges(green.commit, head);
+    if (after.length > 0) out.push(`G7: server/ changed after the green, untested: ${after.join(', ')}; rebuild and run the green again`);
+  }
   if (c.kind === 'bare-text') out.push(...c.staticProblems.map((p) => `G8: ${p}`));
   const committed = repo.committedRuns(c.issue);
   for (const [name, r] of both) if (!committed.has(JSON.stringify(r))) out.push(`G10: the ${name} record is not committed as is in .verify/runs/issue-${c.issue}.jsonl; commit the records`);
@@ -85,14 +93,18 @@ export function evaluate(records: RunRecord[], c: GateCheck, repo: GateRepo): Ve
   return { ok: false, reasons: first ?? [`G1: no failing run of ${c.id} before its passing run`] };
 }
 
-// The latest confirm run of this green decides: it must pass, on the green's
-// image and fixtures, on a volume nobody explored. A later failing confirm
-// cancels an earlier pass.
+// The latest confirm run of this green decides: it must pass, after the
+// green, on the green's image and fixtures, on a volume nobody explored, and
+// as the next run on the green's volume (nothing else in between) or the
+// first run on a new one. A later failing confirm cancels an earlier pass.
 export function confirmOf(records: RunRecord[], green: RunRecord): RunRecord | undefined {
   const at = records.findIndex((r) => JSON.stringify(r) === JSON.stringify(green));
+  if (at < 0) return undefined;
   const mine = records.slice(at + 1).filter((r) => r.confirm && r.check === green.check && r.issue === green.issue && r.checkHash === green.checkHash && r.imageHash === green.imageHash && r.treeHash === green.treeHash);
   const last = mine.at(-1);
-  return last && last.pass && !last.explored && last.fixturesHash === green.fixturesHash ? last : undefined;
+  if (!last || !last.pass || last.explored || last.fixturesHash !== green.fixturesHash || !(last.time > green.time)) return undefined;
+  if (green.kind === 'e2e' && last.runIndex !== (last.generation === green.generation ? green.runIndex + 1 : 0)) return undefined;
+  return last;
 }
 
 export function gitRepo(root: string): GateRepo {

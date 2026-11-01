@@ -21,8 +21,8 @@ test('the e2e confirm run needs the green image running on an unexplored volume 
   commit(root, { 'server/config.yml': "crate:\n  name: 'Fixed'\n" });
   const b = rev('HEAD');
   const ident = (c: string) => ({ commit: c, treeHash: rev(`${c}:server`), harnessHash: 'h1', imageHash: createHash('sha256').update(`${rev(`${c}:server`)}\nh1`).digest('hex') });
-  const base = { check: '3-motd', issue: 3, kind: 'e2e', target: 'dev', time: 't', source: 'archive', fixturesHash: 'f1', checkHash: rev('HEAD:checks/3-motd'), containerId: 'c', confirm: false, output: '' };
-  write(root, { '.verify/runs/issue-3.jsonl': `${JSON.stringify({ ...base, ...ident(a), pass: false, generation: 'g1', fresh: true, explored: false })}\n${JSON.stringify({ ...base, ...ident(b), pass: true, generation: 'g2', fresh: false, explored: false })}\n` });
+  const base = { check: '3-motd', issue: 3, kind: 'e2e', target: 'dev', source: 'archive', fixturesHash: 'f1', checkHash: rev('HEAD:checks/3-motd'), containerId: 'c', runIndex: 0, toolHash: 'tool1', confirm: false, output: '' };
+  write(root, { '.verify/runs/issue-3.jsonl': `${JSON.stringify({ ...base, ...ident(a), time: '2026-01-01T00:00:01Z', pass: false, generation: 'g1', fresh: true, explored: false })}\n${JSON.stringify({ ...base, ...ident(b), time: '2026-01-01T00:00:02Z', pass: true, generation: 'g2', fresh: false, explored: false })}\n` });
   records(root);
   const green = ident(b);
   let r = check(root, { FAKE_LABELS: JSON.stringify({ ...LABELS, 'mc-harness.image': ident(a).imageHash }) }, 'gate', '3-motd');
@@ -41,8 +41,14 @@ test('the e2e confirm run needs the green image running on an unexplored volume 
   r = check(root, { FAKE_LABELS: JSON.stringify({ ...labels, 'mc-harness.fixtures': 'f2' }), FAKE_REPLY: normal }, 'gate', '3-motd');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /the confirm run of 3-motd does not match the green/);
+  // Those failed confirms were runs on this volume: a confirm after them is
+  // not the next run after the green. A rebuilt pod (a new volume) is.
   r = check(root, { FAKE_LABELS: JSON.stringify(labels), FAKE_REPLY: normal }, 'gate', '3-motd');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /the confirm run of 3-motd does not match the green/);
+  git(root, 'clean', '-qfx', 'fakefs');
+  r = check(root, { FAKE_LABELS: JSON.stringify({ ...labels, 'mc-harness.generation': 'gen-new' }), FAKE_REPLY: normal }, 'gate', '3-motd');
   assert.equal(r.status, 0, r.stderr);
   const last = readRecords(root, 3).at(-1);
-  assert.deepEqual([last?.confirm, last?.pass, last?.imageHash, last?.explored], [true, true, green.imageHash, false]);
+  assert.deepEqual([last?.confirm, last?.pass, last?.imageHash, last?.explored, last?.runIndex], [true, true, green.imageHash, false, 0]);
 });

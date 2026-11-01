@@ -20,7 +20,8 @@ const USAGE = `usage: check <command> <id> [options]
                           append a record to .verify/runs/issue-N.jsonl
   gate <id> [--no-confirm] [--pod ID]
                           check the red→green pair (rules G1-G10), then re-run
-                          the green on the pod booted from its image
+                          the green on the pod booted from its image; commit
+                          the records it appends
   postmortem <id>         write docs/postmortems/<date>-<N>-<slug>.md
   runbook <id>            write docs/runbooks/<date>-<N>-<slug>.md
                           (both only after a confirmed gate pass)
@@ -126,6 +127,7 @@ function main(argv: string[]) {
       if (!v.ok) fail(`${cmd}: the gate refuses ${o.id}:\n  ${v.reasons.join('\n  ')}`);
       const confirm = confirmOf(records, v.green);
       if (!confirm) fail(`${cmd}: the green of ${o.id} has no passing latest confirm run; run bin/check gate ${o.id}`);
+      if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${o.id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
       say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm)}`);
       break;
     }
