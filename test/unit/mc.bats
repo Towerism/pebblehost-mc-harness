@@ -283,7 +283,9 @@ make_worktree() {
   mv "$main/.env" "$MC_HOME/.env"
   nogit=$BATS_TEST_TMPDIR/nogit
   mkdir "$nogit"
-  for f in /usr/bin/* /bin/*; do [ "${f##*/}" = git ] || ln -sf "$f" "$nogit/"; done
+  # One ln for every binary (a loop forks thousands of times), then drop git.
+  ln -sf /usr/bin/* /bin/* "$nogit/"
+  rm -f "$nogit/git"
   echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
   PATH=$BATS_TEST_DIRNAME/stub:$nogit "$mc" pull plugins/a.yml
   PATH=$BATS_TEST_DIRNAME/stub:$nogit run "$mc" push plugins/a.yml
