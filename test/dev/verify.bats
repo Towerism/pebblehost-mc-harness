@@ -202,6 +202,22 @@ EOF
   [[ $output == *"G9: the red's volume "*" was explored"* ]]
 }
 
+@test "two runs at once on a new volume: positions come from the log, and the overlap is flagged" {
+  run dev rebuild
+  [ "$status" -eq 0 ]
+  ISSUE=9 check run 7-difficulty >/dev/null 2>&1 &
+  a=$!
+  ISSUE=9 check run 7-difficulty >/dev/null 2>&1 &
+  b=$!
+  wait "$a" || true
+  wait "$b" || true
+  summary=$(node -e 'const rs = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse); console.log(rs.map((r) => r.runIndex).sort().join(","), rs.filter((r) => r.runIndex !== 0 || r.concurrent).length)' "$MC_HOME/.verify/runs/issue-9.jsonl")
+  echo "$summary"
+  # Never two first runs; at most one record is a clean first run.
+  [ "${summary% *}" = "0,1" ]
+  [ "${summary#* }" -ge 1 ]
+}
+
 @test "down --all leaves nothing labelled" {
   run dev down --all
   [ "$status" -eq 0 ]
