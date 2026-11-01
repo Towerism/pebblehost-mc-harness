@@ -1,7 +1,7 @@
 // bin/check run: run checks/<id>/*.test.ts with node --test against the pod
 // (e2e) or the committed tree (bare-text), then append a run record.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,7 +10,7 @@ import { fail, type Docker } from '../dev/docker.ts';
 import { dirtyHarness, dirtyServer, git, labels, privateDir, source, toolHash } from '../dev/image.ts';
 import { isExplored, logRun, names, podOf, readPodFile, relayRequest, runPosition, state, type Pod } from '../dev/pod.ts';
 import { fixtureDirs, readProfile, type Profile } from './profile.ts';
-import { LIVE_SKIP } from './live.ts';
+import { LIVE_CHANGED, LIVE_SKIP } from './live.ts';
 import { appendRecord, type RunRecord } from './record.ts';
 
 // The git tree id of the committed checks/<id>/; refuses uncommitted changes
@@ -75,8 +75,38 @@ export function checkEnv(root: string, id: string, pod: string, commit: string, 
 export type LiveRun = { home: string; envFile: string };
 
 export function startLive(root: string): LiveRun {
+  sweepLiveRuns(root);
   const dir = privateDir(join(privateDir(join(root, '.dev')), 'live'));
-  return { home: mkdtempSync(join(dir, 'run-')), envFile: process.env.MC_ENV_FILE || join(root, '.env') };
+  const home = mkdtempSync(join(dir, 'run-'));
+  writeFileSync(join(home, '.owner'), `${process.pid}\n`);
+  return { home, envFile: process.env.MC_ENV_FILE || join(root, '.env') };
+}
+
+// Remove the live run homes whose owner process is gone: a run killed by a
+// signal (even SIGKILL) leaves its pulled live files behind. A home created
+// this past minute may not have its owner file yet and is left alone.
+export function sweepLiveRuns(root: string): number {
+  const dir = join(root, '.dev', 'live');
+  if (!existsSync(dir)) return 0;
+  let removed = 0;
+  for (const name of readdirSync(dir).filter((n) => n.startsWith('run-'))) {
+    const home = join(dir, name);
+    const owner = existsSync(join(home, '.owner')) ? Number(readFileSync(join(home, '.owner'), 'utf8')) : 0;
+    if (owner > 0 && alive(owner)) continue;
+    if (owner === 0 && Date.now() - statSync(home).mtimeMs < 60_000) continue;
+    rmSync(home, { recursive: true, force: true });
+    removed++;
+  }
+  return removed;
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 // executed: tests that ran to a result; skipped: tests the live target
@@ -110,6 +140,8 @@ export function runTests(root: string, id: string, files: string[], env: Record<
     if (r.error) fail(`node --test did not finish: ${r.error.message}\n${output}`);
     const refused = output.split('\n').find((l) => l.includes('import refused:'));
     if (refused) fail(`checks/${id} imports from outside its directory; nothing recorded\n${refused.trim()}`);
+    const changed = output.split('\n').find((l) => l.includes(LIVE_CHANGED));
+    if (changed) fail(`checks/${id}: ${changed.trim().replace(/^.*?(live database changed)/, '$1')}; nothing recorded`);
     // node --test reports a file that defines no test as one passing test
     // named after the file: that run proves nothing.
     const top = tapResults(existsSync(tap) ? readFileSync(tap, 'utf8') : '');

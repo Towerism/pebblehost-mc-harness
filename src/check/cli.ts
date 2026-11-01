@@ -12,7 +12,7 @@ import { writeDoc } from '../gate/docs.ts';
 import { confirmCheck, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
 import { issueOf, readRecords, runsFile, type Kind, type RunRecord } from './record.ts';
 import { readProfile } from './profile.ts';
-import { runCheck, type Target } from './run.ts';
+import { runCheck, sweepLiveRuns, type Target } from './run.ts';
 import { runSuite, teardownSuitePods } from './suite.ts';
 import { formatTimings } from './timings.ts';
 
@@ -100,6 +100,32 @@ function verdict(root: string, id: string, issue: number, records: RunRecord[]):
   return { ...evaluate(records, { id, issue, kind, ...bare }, gitRepo(root)), kind };
 }
 
+// bin/check run and gate run node --test synchronously in a child, so the
+// parent can react to SIGINT/SIGTERM: kill the child's process group (the
+// check's node --test with it), remove the run's live home, exit 130/143.
+function runParent(root: string, argv: string[]): void {
+  const child = spawn(process.execPath, [import.meta.filename, ...argv], { stdio: 'inherit', detached: true, env: { ...process.env, MC_HOME: root, MC_RUN_CHILD: '1' } });
+  let signal: NodeJS.Signals | null = null;
+  const stop = (sig: NodeJS.Signals) => {
+    if (signal) return;
+    signal = sig;
+    process.stderr.write(`check: ${sig}: stopping the run\n`);
+    try {
+      process.kill(-(child.pid as number), 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  child.on('exit', (code) => {
+    if (signal === null) process.exit(code ?? 2);
+    const n = sweepLiveRuns(root);
+    say(`run: ${signal}: stopped; nothing recorded${n ? `; removed ${n} live run home(s)` : ''}`);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  });
+}
+
 function suiteParent(root: string, argv: string[]): void {
   // A suite whose parent was SIGKILLed can leave its child and pods behind.
   if (killOrphanSuite(root)) say('suite: stopped an orphaned suite run');
@@ -124,6 +150,7 @@ function suiteParent(root: string, argv: string[]): void {
   child.on('exit', (code) => {
     rmSync(suitePidFile(root), { force: true });
     if (signal === null) process.exit(code ?? 2);
+    sweepLiveRuns(root);
     // A docker call the kill cut short can still finish creating its
     // resource a moment later: sweep again until a pass finds nothing.
     let removed = 0;
@@ -165,6 +192,10 @@ function main(argv: string[]) {
     return;
   }
   if (o.id === undefined) fail(`${cmd} needs a check id\n${USAGE}`);
+  if ((cmd === 'run' || cmd === 'gate') && process.env.MC_RUN_CHILD !== '1') {
+    runParent(root, argv);
+    return;
+  }
   if (o.target === 'live' && cmd !== 'run') fail(`${cmd} works on dev records only; --target live is for run and suite`);
   const issue = issueOf(root, o.issue);
   switch (cmd) {

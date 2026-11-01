@@ -10,6 +10,9 @@ import { HARNESS_ROOT } from '../dev/image.ts';
 
 // In a skipped test's error; bin/check run counts such a test as skipped.
 export const LIVE_SKIP = 'MC_LIVE_SKIP';
+// In a test's error when a database kept changing while it was pulled:
+// bin/check run refuses the run (exit 2) and records nothing.
+export const LIVE_CHANGED = 'live database changed during pull';
 
 export class LiveReadOnlyError extends Error {}
 
@@ -24,12 +27,37 @@ export function refuseOnLive(what: string, need: 'console' | 'bot' | 'restart'):
   throw new LiveReadOnlyError(`${what} is not available on the live target, and the check's profile.json doesn't declare ${need === 'restart' ? '"restart": true' : `"needs": ["${need}"]`}`);
 }
 
-// Pull one server path from live into the run's home and return the local
-// copy's path. bin/mc refuses absolute paths and `..`.
-export function livePull(path: string): string {
+function mc(args: string[]): string {
   const home = process.env.MC_LIVE_HOME;
   if (!home || !process.env.MC_ENV_FILE) throw new Error('MC_LIVE_HOME or MC_ENV_FILE is not set: run checks with bin/check run --target live');
-  const r = spawnSync(join(HARNESS_ROOT, 'bin/mc'), ['pull', path], { encoding: 'utf8', env: { ...process.env, MC_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] });
-  if (r.status !== 0) throw new Error(`bin/mc pull ${path} failed: ${(r.stderr || r.stdout).trim()}`);
-  return join(home, 'server', path);
+  const r = spawnSync(join(HARNESS_ROOT, 'bin/mc'), args, { encoding: 'utf8', env: { ...process.env, MC_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.status !== 0) throw new Error(`bin/mc ${args.join(' ')} failed: ${(r.stderr || r.stdout).trim()}`);
+  return r.stdout;
+}
+
+// One level of a live directory (bin/mc ls -l): name -> "size modtime", a
+// directory's name ending in /.
+export function liveList(dir: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of mc(['ls', '-l', ...(dir ? [dir] : [])]).split('\n')) {
+    const m = /^\s*(\S+)  (\S+ \S+)  (.+)$/.exec(line);
+    if (m) out.set(m[3], `${m[1]} ${m[2]}`);
+  }
+  return out;
+}
+
+export const splitPath = (path: string) => ({ dir: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '', name: path.slice(path.lastIndexOf('/') + 1) });
+
+// Pull one regular file from live into the run's home and return the local
+// copy's path. A directory would pull everything under it, so the parent is
+// listed first and anything but a file there is refused. bin/mc refuses
+// absolute paths and `..`.
+export function livePull(path: string): string {
+  if (path.split('/').some((s) => s === '' || s === '.')) throw new Error(`${path || '(empty)'}: a live read takes a file path (no trailing /, no empty or . segment), not a directory`);
+  const { dir, name } = splitPath(path);
+  const there = liveList(dir);
+  if (there.has(`${name}/`)) throw new Error(`${path} is a directory on live; a live read pulls single files only`);
+  if (!there.has(name)) throw new Error(`${path} not found on live`);
+  mc(['pull', path]);
+  return join(process.env.MC_LIVE_HOME as string, 'server', path);
 }
