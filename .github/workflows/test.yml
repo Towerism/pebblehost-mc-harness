@@ -5,19 +5,37 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      # Full history, so the path guard can walk every commit since origin/main.
-      - uses: actions/checkout@v4
+      # Full history, so the path guard can walk every new commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
+      # First, and needs no npm packages. A push checks what it added to the
+      # branch (all of history when the branch is new); a PR checks its commits.
+      - name: path guard
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ $EVENT == pull_request ]]; then
+            bin/path-guard --range "origin/$BASE_REF..HEAD"
+          elif [[ $BEFORE =~ ^0+$ ]]; then
+            bin/path-guard --history "$SHA"
+          else
+            bin/path-guard --range "$BEFORE..$SHA"
+          fi
       - run: sudo apt-get update && sudo apt-get install -y bats parallel shellcheck
       - run: npm ci
       - run: make lint test-unit
-      - run: bin/path-guard --range origin/main..HEAD
