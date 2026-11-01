@@ -268,14 +268,15 @@ test('pruneImages keeps the new server and relay images and images a container u
 test('createPod: internal IPv4-only network without a gateway, labelled volume, no published port', () => {
   const p = podOf(tmp(), 'dev');
   const { d, calls, envs } = recorder();
-  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw' }, d);
+  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false }, d);
   const labels = ['--label', `mc-harness.project=${p.project}`, '--label', 'mc-harness.pod=dev'];
   const prefix = `mc-${p.project}-dev`;
   assert.deepEqual(calls[0], ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labels, `${prefix}-net`]);
-  assert.deepEqual(calls[1], ['volume', 'create', ...labels, `${prefix}-server`]);
+  const gen = ['--label', 'mc-harness.generation=g1', '--label', 'mc-harness.fresh=false'];
+  assert.deepEqual(calls[1], ['volume', 'create', ...labels, ...gen, `${prefix}-server`]);
   const run = calls[2];
   assert.deepEqual(run.slice(0, 8), ['run', '-d', '--name', `${prefix}-server`, '--hostname', 'mc-dev', '--network', `${prefix}-net`]);
-  const pairs = [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '4096'], ['-e', 'MC_JAR=purpur.jar'], ['--add-host', 'bstats.org:127.0.0.1']];
+  const pairs = [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], gen, ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '4096'], ['-e', 'MC_JAR=purpur.jar'], ['--add-host', 'bstats.org:127.0.0.1']];
   for (const pair of pairs) assert.ok(run.join('\0').includes(pair.join('\0')), pair.join(' '));
   assert.ok(!run.some((a) => a === '-p' || a.startsWith('--publish') || a === '-P' || a === '--memory'));
   assert.ok(!run.some((a) => a.startsWith('RCON_PASSWORD=') || a.includes('pw')), 'RCON password in argv');
@@ -295,7 +296,7 @@ test('createPod: internal IPv4-only network without a gateway, labelled volume, 
   assert.equal(relay[relay.length - 1], 'mc-relay:r1');
   assert.equal(calls.length, 4);
   const mem = recorder();
-  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', memory: '6g' }, mem.d);
+  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false, memory: '6g' }, mem.d);
   assert.ok(mem.calls[2].join('\0').includes(['--memory', '6g'].join('\0')));
 });
 

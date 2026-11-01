@@ -3,7 +3,7 @@
 // container (src/relay/) on that network only, which holds the RCON connection. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
 import { dirHash, privateDir, walk } from './image.ts';
@@ -90,16 +90,19 @@ export function mergeFixtures(sources: string[], dest: string): string {
   return dirHash(dest);
 }
 
-export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string; memory?: string };
+// generation: a new id for each new volume; fresh: made by bin/check run
+// --fresh. Both are labels on the volume and the server container.
+export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; generation: string; fresh: boolean; javaOpts?: string; memory?: string };
 
 // Network, volume, server and relay. No published port: bin/dev join adds a
 // proxy. The RCON password reaches docker through its environment, never argv.
 export function createPod(p: Pod, s: Spec, d: Docker): void {
   const n = names(p);
   must(d, ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labelArgs(p), n.net]);
-  must(d, ['volume', 'create', ...labelArgs(p), n.vol]);
+  const gen = ['--label', `mc-harness.generation=${s.generation}`, '--label', `mc-harness.fresh=${s.fresh}`];
+  must(d, ['volume', 'create', ...labelArgs(p), ...gen, n.vol]);
   const run = ['run', '-d', '--name', n.server, '--hostname', `mc-${p.pod}`, '--network', n.net, ...labelArgs(p)];
-  run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`);
+  run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`, ...gen);
   run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', 'RCON_PASSWORD', '-e', `MC_JAR=${s.jar}`);
   for (const host of EGRESS_SINKS) run.push('--add-host', `${host}:127.0.0.1`);
   if (s.javaOpts) run.push('-e', `JAVA_OPTS=${s.javaOpts}`);
@@ -122,6 +125,37 @@ export function createJoin(p: Pod, port: number, image: string, d: Docker): void
   must(d, [...run, image, 'TCP-LISTEN:25565,fork,reuseaddr', `TCP:${n.server}:25565`]);
   must(d, ['network', 'connect', n.net, n.join]);
   must(d, ['start', n.join]);
+}
+
+// Send one request to the pod's relay daemon (src/relay/) and return its
+// reply; fails with the relay's reason when the reply is not ok.
+export function relayRequest(p: Pod, d: Docker, req: { op: string } & Record<string, unknown>): Record<string, unknown> {
+  const n = names(p);
+  const st = state(d, n.relay);
+  if (st !== 'running') fail(`relay of pod ${p.pod} is ${st ?? 'missing'}; bin/dev rebuild recreates it`);
+  const r = d(['exec', '-i', n.relay, 'node', '/relay/client.ts'], { input: `${JSON.stringify(req)}\n` });
+  let reply: { ok?: boolean; error?: string } & Record<string, unknown>;
+  try {
+    reply = JSON.parse(r.stdout);
+  } catch {
+    fail(`relay gave no reply: ${(r.stderr || r.stdout).trim()}`);
+  }
+  if (reply.ok !== true) fail(reply.error ?? `relay reply not ok: ${r.stdout.trim()}`);
+  return reply;
+}
+
+// Generations a human touched (bin/dev console, join): their reds don't count
+// for the gate (G9). Kept in the pod's directory, one id per line.
+export function markExplored(p: Pod, generation: string): void {
+  if (isExplored(p, generation)) return;
+  const n = names(p);
+  privateDir(n.dir);
+  appendFileSync(join(n.dir, 'explored'), `${generation}\n`, { mode: 0o600 });
+}
+
+export function isExplored(p: Pod, generation: string): boolean {
+  const f = join(names(p).dir, 'explored');
+  return existsSync(f) && readFileSync(f, 'utf8').split('\n').includes(generation);
 }
 
 function ids(d: Docker, kind: 'container' | 'volume' | 'network', filters: string[]): string[] {
