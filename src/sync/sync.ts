@@ -23,6 +23,9 @@ const BUDGET_S = 30;
 // rewritten since in the same second, size unchanged.
 const WINDOW_S = 120;
 
+// Filters written from sync-rules match ignoring case, as the rules do.
+const RULES_CASE = { MC_EXCLUDE_IGNORE_CASE: '1' };
+
 const say = (msg: string) => process.stdout.write(`${msg}\n`);
 
 function mustGit(dir: string, args: string[]): string {
@@ -39,10 +42,12 @@ export function envFile(root: string): string {
 
 // bin/mc with its own MC_HOME and the project's .env; one rclone retry, so a
 // file live rewrites mid-copy fails the pull instead of re-downloading it all.
+// Excludes are exact-case unless the caller passes RULES_CASE.
 export function mc(home: string, root: string, args: string[], exclude?: string, extra: Record<string, string> = {}, input?: string): { status: number; out: string } {
   const env: Record<string, string | undefined> = { ...process.env, MC_HOME: home, MC_ENV_FILE: envFile(root), RCLONE_RETRIES: '1', MC_EXCLUDE_FILE: exclude, ...extra };
   if (!exclude) delete env.MC_EXCLUDE_FILE;
   if (!extra.MC_FILTER_FILE) delete env.MC_FILTER_FILE;
+  if (!extra.MC_EXCLUDE_IGNORE_CASE) delete env.MC_EXCLUDE_IGNORE_CASE;
   const r = spawnSync(join(HARNESS_ROOT, 'bin/mc'), args, { encoding: 'utf8', env, input, maxBuffer: 1 << 28, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
   return { status: r.status ?? 2, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
@@ -66,7 +71,7 @@ function pull(home: string, root: string, path: string, rules: Rule[], classes: 
     say(`sync-rules ${matchRule(rules, path, classes)?.cls} ${matchRule(rules, path, classes)?.pattern}: ${path} not pulled`);
     return;
   }
-  const r = mc(home, root, ['pull', path], ex);
+  const r = mc(home, root, ['pull', path], ex, RULES_CASE);
   if (r.status !== 0) transferFailed(`pull of ${path}`, r.out);
 }
 
@@ -154,7 +159,7 @@ function listLive(wt: string, root: string, rules: Rule[]): Listing {
   const ex = rcloneExcludes(rules, ['skip', 'data']).split('\n').filter(Boolean).map((l) => `- ${l}`);
   const inc = [...SYNC_ROOTS.flatMap((r) => [`+ /${r}`, `+ /${r}/**`]), '+ /*.jar'];
   writeFileSync(f, `${[...ex, ...inc, '- **'].join('\n')}\n`);
-  const r = mc(wt, root, ['ls', '-R', '-l'], undefined, { MC_FILTER_FILE: f, RCLONE_CHECKERS: checkers() });
+  const r = mc(wt, root, ['ls', '-R', '-l'], undefined, { ...RULES_CASE, MC_FILTER_FILE: f, RCLONE_CHECKERS: checkers() });
   rmSync(f, { force: true });
   if (r.status !== 0) fail(`listing live failed:\n${r.out.trim()}`);
   const files = parseListing(r.out);
@@ -366,7 +371,7 @@ export function inventory(root: string, waitS: number, dirs = ['plugins']): stri
     for (const d of dirs) {
       const ex = join(wt, '.mc-exclude');
       writeFileSync(ex, rcloneExcludes(rules, ['skip'], d));
-      const r = mc(wt, root, ['ls', '-R', '-l', d], ex);
+      const r = mc(wt, root, ['ls', '-R', '-l', d], ex, RULES_CASE);
       if (r.status !== 0) fail(`bin/mc ls -R ${d} failed:\n${r.out.trim()}`);
       for (const line of r.out.split('\n')) {
         const m = /^\s*(\S+)\s+(\S+ \S+)\s+(.+)$/.exec(line);
