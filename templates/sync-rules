@@ -3,7 +3,8 @@
 # slash before the end they are anchored there, without one they match a name
 # at any depth, and a match includes everything below it. A trailing / matches
 # directories only. `*` and `?` stay within one name; `**/` at the start and
-# `/**/` inside match zero or more directories. No `!` and no `..`.
+# `/**/` inside match zero or more directories. No `!` and no `..`. Matching
+# ignores case, like the private guard.
 #   skip    never transferred, never committed
 #   data    pulled only by bin/dev seed --with-data, never committed
 #   review  proposed by bin/dev inventory; no effect until made skip or data
@@ -13,12 +14,16 @@
 skip plugins/ajLeaderboards/past-resets/
 skip logs/
 skip crash-reports/
-skip spark/tmp/
+skip plugins/spark/tmp/
+skip plugins/WorldEdit/.archive-unpack/
 skip .trash/
 skip *.partial
+skip *.zip
 
 # Plugin and player data.
 data *.db
+data *.db-wal
+data *.db-shm
 data *.sqlite
 data *.mv.db
 data *.h2.db

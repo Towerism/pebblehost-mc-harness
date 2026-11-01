@@ -9,10 +9,14 @@ node_modules/
 /server/plugins/ajLeaderboards/past-resets/
 /server/**/logs/
 /server/**/crash-reports/
-/server/spark/tmp/
+/server/plugins/spark/tmp/
+/server/plugins/WorldEdit/.archive-unpack/
 /server/**/.trash/
 /server/**/*.partial
+/server/**/*.zip
 /server/**/*.db
+/server/**/*.db-wal
+/server/**/*.db-shm
 /server/**/*.sqlite
 /server/**/*.mv.db
 /server/**/*.h2.db

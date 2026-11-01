@@ -54,12 +54,14 @@ const glob = (p: string) =>
 // everything below a matching directory.
 // A pattern ending in / matches directories only: for a file path, only
 // what lies below such a directory (`dir` says rel is a directory).
+// Case is ignored, as the private guard ignores it: plugins name the same
+// data PlayerData/ or playerdata/.
 export function ruleRegex(pattern: string, dir = false): RegExp {
   const p = pattern.replace(/\/+$/, '');
   const anchored = p.includes('/');
   const body = glob(p.replace(/^\/+/, ''));
   const below = pattern.endsWith('/') && !dir ? '/.*' : '(/.*)?';
-  return new RegExp(`${anchored ? '^' : '(^|/)'}${body}${below}$`);
+  return new RegExp(`${anchored ? '^' : '(^|/)'}${body}${below}$`, 'i');
 }
 
 // The first rule of the given classes matching a server-relative path.

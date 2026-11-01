@@ -42,7 +42,7 @@ test('**/ and /**/ match zero or more directories; a pattern ending in / matches
     ['plugins/x.db', 'plugins/**/x.db'],
     ['plugins/A/x.db', 'plugins/**/x.db'],
     ['plugins/A/B/x.db', 'plugins/**/x.db'],
-    ['plugins/A/y.db', undefined],
+    ['plugins/B/y.db', undefined],
     ['cache.json', '**/cache.json'],
     ['plugins/C/cache.json', '**/cache.json'],
     ['plugins/E/userdata/u.yml', 'userdata/'],
@@ -84,6 +84,18 @@ test('the shipped defaults parse, never sync past-resets and keep databases and 
   assert.equal(matchRule(rules, 'plugins/ajLeaderboards/past-resets/x.json')?.cls, 'skip');
   for (const p of ['plugins/A/a.db', 'plugins/A/b.sqlite', 'plugins/A/c.mv.db', 'world/playerdata/u.dat', 'plugins/Essentials/userdata/u.yml']) assert.equal(matchRule(rules, p)?.cls, 'data', p);
   for (const p of ['logs/latest.log', 'plugins/x.partial', '.trash/a']) assert.equal(matchRule(rules, p)?.cls, 'skip', p);
+  // Found by the first live sync: WorldEdit's unpacked jar, spark's temp files
+  // under plugins/, SQLite's side files and archives.
+  for (const p of ['plugins/WorldEdit/.archive-unpack/x/a.class', 'plugins/spark/tmp/p.tmp', 'plugins/Backup/2026-11-01.zip', 'w.zip']) assert.equal(matchRule(rules, p)?.cls, 'skip', p);
+  for (const p of ['plugins/A/a.db-wal', 'plugins/A/a.db-shm']) assert.equal(matchRule(rules, p)?.cls, 'data', p);
+  assert.equal(matchRule(rules, 'plugins/WorldEdit/config.yml'), undefined);
+});
+
+test('rule names match in any case, like the private guard', () => {
+  const rules = readRules(tmp());
+  for (const p of ['plugins/GriefPreventionData/PlayerData/u.yml', 'plugins/Eco/UserData/s.yml', 'plugins/A/Stats.DB', 'Logs/latest.log']) assert.ok(matchRule(rules, p), p);
+  const anchored = parseRules('skip plugins/ajLeaderboards/past-resets/\n');
+  assert.equal(matchRule(anchored, 'plugins/AJLeaderboards/Past-Resets/1.json')?.cls, 'skip');
 });
 
 test("the private path guard refuses server paths the repo's sync-rules mark skip or data", () => {
