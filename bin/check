@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# check: run checks and record them for the red→green gate. See src/check/cli.ts.
+set -euo pipefail
+
+exec node "$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/check/cli.ts" "$@"
