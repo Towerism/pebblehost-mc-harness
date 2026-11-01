@@ -28,17 +28,30 @@ function mustGit(root: string, args: string[]): string {
 
 export type PushSet = { changed: string[]; added: string[]; deleted: string[]; notPushed: string[] };
 
+const FILE_MODES = new Set(['100644', '100755', '000000']);
+
 // What main...issue/N changes: server/ files to push (changed or added),
-// deleted server/ files, and the paths outside server/.
+// deleted server/ files, and the paths outside server/. A server/ path that
+// is a symlink or a submodule on either side, or whose name starts a segment
+// with - or holds a newline, is refused: only regular files go to live.
 export function pushSet(root: string, n: number): PushSet {
   for (const b of ['main', `issue/${n}`]) if (git(root, ['rev-parse', '--verify', '-q', `refs/heads/${b}`]).status !== 0) fail(`no ${b} branch`);
   const set: PushSet = { changed: [], added: [], deleted: [], notPushed: [] };
-  const out = mustGit(root, ['diff', '--name-status', '--no-renames', '-z', `main...issue/${n}`]).split('\0').filter(Boolean);
-  for (let i = 0; i < out.length; i += 2) {
-    const [status, path] = [out[i], out[i + 1]];
-    if (!path.startsWith('server/')) set.notPushed.push(path);
-    else if (status === 'D') set.deleted.push(path.slice('server/'.length));
-    else (status === 'A' ? set.added : set.changed).push(path.slice('server/'.length));
+  const r = git(root, ['diff', '--raw', '--no-renames', '--no-abbrev', '-z', `main...issue/${n}`]);
+  if (r.status !== 0) fail(`git diff main...issue/${n} failed: ${r.stderr.trim()}`);
+  const out = r.stdout.split('\0');
+  for (let i = 0; i + 1 < out.length; i += 2) {
+    const [, oldMode, newMode, , , status] = /^:(\d+) (\d+) (\w+) (\w+) (\w)/.exec(out[i]) ?? fail(`unexpected git diff line ${out[i]}`);
+    const path = out[i + 1];
+    if (!path.startsWith('server/')) {
+      set.notPushed.push(path);
+      continue;
+    }
+    const rel = path.slice('server/'.length);
+    if (!FILE_MODES.has(oldMode) || !FILE_MODES.has(newMode)) fail(`server/${rel} is not a regular file on both sides (mode ${oldMode} -> ${newMode}: a symlink or submodule); only regular files are pushed: take it out of issue/${n}`);
+    if (/\n/.test(rel) || rel.split('/').some((s) => s.startsWith('-'))) fail(`server/${JSON.stringify(rel).slice(1, -1)}: a name starting with - or holding a newline is never pushed; rename it on issue/${n}`);
+    if (status === 'D') set.deleted.push(rel);
+    else (status === 'A' ? set.added : set.changed).push(rel);
   }
   return set;
 }
@@ -68,7 +81,7 @@ const escape = (name: string) => name.replace(/[\\*?[\]{}]/g, '\\$&');
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 function lsNames(home: string, root: string, dir: string): string[] {
-  const r = mc(home, root, ['ls', ...(dir ? [dir] : [])]);
+  const r = mc(home, root, ['ls', ...(dir ? ['--', dir] : [])]);
   if (r.status !== 0) fail(`bin/mc ls ${dir || '.'} failed:\n${r.out.trim()}`);
   return r.out.split('\n').filter(Boolean);
 }
@@ -110,7 +123,7 @@ function prepare(root: string, n: number, set: PushSet, home: string): { units: 
   const diffs: string[] = [];
   for (const u of units) {
     rmSync(join(home, 'server', u.transfer), { recursive: true, force: true });
-    const r = mc(home, root, ['pull', u.transfer], u.exclude);
+    const r = mc(home, root, ['pull', '--', u.transfer], u.exclude);
     if (r.status !== 0) fail(`could not pull ${u.transfer} from live${u.added ? '' : ' (deleted on live?)'}:\n${r.out.trim()}`);
     if (u.added) {
       const there = files(join(home, 'server', u.transfer));
@@ -122,7 +135,7 @@ function prepare(root: string, n: number, set: PushSet, home: string): { units: 
       mkdirSync(dirname(join(home, 'server', f)), { recursive: true });
       writeFileSync(join(home, 'server', f), blob(root, `issue/${n}`, f));
     }
-    const d = mc(home, root, ['diff', u.transfer], u.exclude);
+    const d = mc(home, root, ['diff', '--', u.transfer], u.exclude);
     if (d.status > 1) fail(`bin/mc diff ${u.transfer} failed:\n${d.out.trim()}`);
     diffs.push(d.out.trimEnd());
   }
@@ -148,10 +161,9 @@ export function runbookPush(root: string, n: number, plan: boolean, requireGate:
     say(`runbook: nothing under server/ to push for issue/${n}`);
     return;
   }
-  if (!plan) {
-    requireRunbook(root, n);
-    requireGate();
-  }
+  // --plan checks the same, so an OK'd plan is not followed by a refusal.
+  requireRunbook(root, n);
+  requireGate();
   const dir = privateDir(runDir(root, n));
   const home = privateDir(join(dir, 'home'));
   const { units, diffs } = prepare(root, n, set, home);
@@ -164,7 +176,7 @@ export function runbookPush(root: string, n: number, plan: boolean, requireGate:
   const journal = join(dir, 'journal.jsonl');
   const run = new Date().toISOString();
   for (const u of units) {
-    const r = mc(home, root, ['push', u.transfer], u.exclude, { MC_RUNBOOK: '1' });
+    const r = mc(home, root, ['push', '--', u.transfer], u.exclude, { MC_RUNBOOK: '1' });
     const m = /previous remote copy (?:is )?in (.+?)\/remote\//.exec(r.out);
     const backup = m ? (isAbsolute(m[1]) ? m[1] : join(home, m[1])) : undefined;
     const entry: Journal = { run, time: new Date().toISOString(), issue: n, transfer: u.transfer, files: u.files, added: u.added, status: r.status === 0 ? 'ok' : 'failed', ...(backup ? { backup } : {}), ...(r.status === 0 ? {} : { error: r.out.trim() }) };
@@ -192,7 +204,7 @@ export function runbookRollback(root: string, n: number): string[] {
     } else if (!e.backup) {
       lines.push(`# ${e.transfer}: nothing was written (${e.status})`);
     } else {
-      lines.push(`# ${e.transfer} (${e.status})`, `${env} ${mcBin} pull ${q(e.transfer)}`, `cp ${q(join(e.backup, 'remote', e.transfer))} ${q(join(home, 'server', e.transfer))}`, `${env} MC_RUNBOOK=1 ${mcBin} push ${q(e.transfer)}`);
+      lines.push(`# ${e.transfer} (${e.status})`, `${env} ${mcBin} pull -- ${q(e.transfer)}`, `cp -- ${q(join(e.backup, 'remote', e.transfer))} ${q(join(home, 'server', e.transfer))}`, `${env} MC_RUNBOOK=1 ${mcBin} push -- ${q(e.transfer)}`);
     }
   }
   return lines;

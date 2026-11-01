@@ -8,12 +8,15 @@ set -euo pipefail
 allowed=vcs.martinfrackerjr.com
 url=${2:-}
 
-# scheme://[user@]host[:port]/path, or scp-like [user@]host:path.
+# Strictly scheme://[user@]host[:port]/path or scp-like [user@]host:path,
+# with a plain host name; a backslash or a stray @ makes it no host at all.
 host=
-if [[ $url =~ ^[a-z+]+://([^/@]*@)?([^/:]+) ]]; then
-  [[ $url == file://* ]] || host=${BASH_REMATCH[2]}
-elif [[ $url =~ ^([^/@]*@)?([^/:]+): ]]; then
-  host=${BASH_REMATCH[2]}
+if [[ $url != *\\* ]]; then
+  if [[ $url =~ ^(ssh|https?|git)://([A-Za-z0-9._~-]+@)?([A-Za-z0-9.-]+)(:[0-9]+)?/[^@]*$ ]]; then
+    host=${BASH_REMATCH[3]}
+  elif [[ $url != *://* && $url =~ ^([A-Za-z0-9._~-]+@)?([A-Za-z0-9.-]+):[^@]*$ ]]; then
+    host=${BASH_REMATCH[2]}
+  fi
 fi
 
 if [[ ${host,,} != "$allowed" ]]; then

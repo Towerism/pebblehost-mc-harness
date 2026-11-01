@@ -34,7 +34,7 @@ export TZ=UTC
 
 usage() {
   cat <<'EOF'
-usage: mc <command> [path] [--all] [-l] [-R]
+usage: mc <command> [--all] [-l] [-R] [--] [path]
 
   ls   [path]  list one remote directory level (dirs end in /);
                -l, --long adds size in bytes and modtime (UTC);
@@ -220,12 +220,19 @@ cmd_push() {
 }
 
 main() {
-  local cmd=${1:-} path="" all=0 arg
+  local cmd=${1:-} path="" all=0 arg ends=0
   long=0 recursive=0
   [[ -n $cmd ]] || { usage; exit 2; }
   shift
   for arg in "$@"; do
+    # After --, every argument is a path, even one starting with -.
+    if ((ends)); then
+      [[ -z $path ]] || die "one path at a time"
+      path=$(clean_path "$arg")
+      continue
+    fi
     case $arg in
+      --) ends=1 ;;
       --all) all=1 ;;
       -l | --long) long=1 ;;
       -R | --recursive) recursive=1 ;;

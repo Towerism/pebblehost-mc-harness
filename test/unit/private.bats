@@ -98,7 +98,7 @@ private_repo() {
     run "$harness/hooks/private-pre-push" origin "$url" </dev/null
     [ "$status" -eq 0 ] || { echo "$url"; false; }
   done
-  for url in git@github.com:Towerism/survive.git https://github.com/a/b.git /srv/git/s.git file:///srv/git/s.git https://vcs.martinfrackerjr.com.evil.example/x https://vcs.martinfrackerjr.com@evil.example/x ''; do
+  for url in git@github.com:Towerism/survive.git https://github.com/a/b.git /srv/git/s.git file:///srv/git/s.git https://vcs.martinfrackerjr.com.evil.example/x https://vcs.martinfrackerjr.com@evil.example/x 'https://github.com\@vcs.martinfrackerjr.com/x' 'https://vcs.martinfrackerjr.com@github.com/x' 'https://a@b@vcs.martinfrackerjr.com/x' 'ssh://vcs.martinfrackerjr.com\@github.com/x' 'vcs.martinfrackerjr.com\:x' ''; do
     run "$harness/hooks/private-pre-push" gh "$url" </dev/null
     [ "$status" -eq 2 ] || { echo "$url"; false; }
     [[ $output == *"is not on vcs.martinfrackerjr.com"* ]]
@@ -114,4 +114,19 @@ private_repo() {
   run make -s -C "$root" test
   [ "$status" -ne 0 ]
   [[ $output == *"the harness submodule's path-guard hooks are not installed"* ]]
+}
+
+@test "bin/mc takes a path starting with - after --, and only one" {
+  home=$BATS_TEST_TMPDIR/home
+  mkdir -p "$home"
+  run env MC_HOME="$home" MC_ENV_FILE="$envfile" "$harness/bin/mc" pull -x.yml
+  [ "$status" -eq 2 ]
+  [[ $output == *"unknown option: -x.yml"* ]]
+  run env MC_HOME="$home" MC_ENV_FILE="$envfile" "$harness/bin/mc" pull -- -x.yml
+  [ "$status" -eq 0 ]
+  grep -q 'copyto --ignore-times pebble:-x.yml ' "$STUB_LOG"
+  [ -e "$home/server/-x.yml" ]
+  run env MC_HOME="$home" MC_ENV_FILE="$envfile" "$harness/bin/mc" pull -- a b
+  [ "$status" -eq 2 ]
+  [[ $output == *"one path at a time"* ]]
 }

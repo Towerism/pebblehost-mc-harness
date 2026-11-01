@@ -37,7 +37,7 @@ test('drift is a main change since the cut to a path of the set, matched literal
   assert.deepEqual(mainDrift(root, 9, []), []);
 });
 
-test('runbook push and rollback refuse before any transfer: no number, no branch, a sync-rules path, no runbook, no gate pass, drift, no journal', () => {
+test('runbook push and rollback refuse before any transfer: no number, no branch, a sync-rules path, no runbook, no check, no gate pass (with --plan too), not on issue/N, no journal', () => {
   const root = repo();
   commit(root, { 'server/config.yml': 'a: 2\n', 'server/plugins/Eco/data.db': 'db' });
   const run = (...args: string[]) => check(root, {}, 'runbook', ...args);
@@ -67,10 +67,11 @@ test('runbook push and rollback refuse before any transfer: no number, no branch
   r = run('push', '9');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /runbook push 9: check out issue\/9 first \(on main\)/);
-  commit(root, { 'server/config.yml': 'a: live\n' });
+  // --plan checks the gate too, so an OK'd plan is never refused at push.
+  git(root, 'switch', '-q', 'issue/9');
   r = run('push', '9', '--plan');
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /main changed config\.yml after issue\/9 was cut/);
+  assert.match(r.stderr, /runbook push 9: the gate refuses 9-x:/);
   r = run('rollback', '9');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /no push journal for issue 9/);

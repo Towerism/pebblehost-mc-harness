@@ -146,3 +146,98 @@ gate_issue() {
   [ "$(live 'cat plugins/Eco/a.yml')" = 'a: 1' ]
   [ "$(live 'cat plugins/Eco/b.yml')" = 'b: 1' ]
 }
+
+@test "push and --plan need the gate: a runbook doc with no records is refused with nothing written" {
+  # A runbook doc but no records at all.
+  printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
+  issue_commit fix
+  mkdir -p "$MC_HOME/docs/runbooks"
+  echo fake >"$MC_HOME/docs/runbooks/2026-11-01-9-eco.md"
+  rm -rf "$MC_HOME/.verify"
+  issue_commit 'fake runbook, records dropped'
+  for plan in --plan ''; do
+    run "$check" runbook push 9 $plan </dev/null
+    echo "$output"
+    [ "$status" -eq 2 ]
+    [[ $output == *"runbook push 9: the gate refuses 9-eco"* ]]
+  done
+  [ "$(live 'cat plugins/Eco/config.yml')" = 'rate: 1' ]
+  [ ! -e "$MC_HOME/.dev/runbook-9/journal.jsonl" ]
+}
+
+@test "a server/ edit committed after the green is refused at push time" {
+  printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
+  gate_issue
+  printf 'a: sneaked\n' >"$MC_HOME/server/plugins/Eco/a.yml"
+  issue_commit 'after the green'
+  run "$check" runbook push 9 </dev/null
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [[ $output == *"runbook push 9: the gate refuses 9-eco"* ]]
+  [ "$(live 'cat plugins/Eco/a.yml')" = 'a: 1' ]
+  [ "$(live 'cat plugins/Eco/config.yml')" = 'rate: 1' ]
+}
+
+@test "sync-rules skip and data paths, symlinks, typechanges and odd names are refused before anything is written" {
+  printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
+  gate_issue
+  base=$(git -C "$MC_HOME" rev-parse HEAD)
+  try() {
+    issue_commit "$1"
+    run "$check" runbook push 9 --plan </dev/null
+    echo "$output"
+    [ "$status" -eq 2 ]
+    [[ $output == *"$2"* ]] || { echo "want: $2"; false; }
+    git -C "$MC_HOME" reset -q --hard "$base"
+  }
+  mkdir -p "$MC_HOME/server/plugins/Eco/logs"
+  echo log >"$MC_HOME/server/plugins/Eco/logs/today.log"
+  try 'a log' 'sync-rules skip logs/ covers server/plugins/Eco/logs/today.log'
+  echo part >"$MC_HOME/server/plugins/Eco/up.yml.partial"
+  try 'a partial' 'sync-rules skip *.partial covers server/plugins/Eco/up.yml.partial'
+  echo db >"$MC_HOME/server/plugins/Eco/data.db"
+  try 'a db' 'sync-rules data *.db covers server/plugins/Eco/data.db'
+  ln -s /etc/passwd "$MC_HOME/server/plugins/Eco/link.yml"
+  try 'a symlink' 'server/plugins/Eco/link.yml is not a regular file on both sides (mode 000000 -> 120000'
+  rm "$MC_HOME/server/plugins/Eco/b.yml"
+  ln -s a.yml "$MC_HOME/server/plugins/Eco/b.yml"
+  try 'a typechange' 'server/plugins/Eco/b.yml is not a regular file on both sides (mode 100644 -> 120000'
+  echo x >"$MC_HOME/server/plugins/Eco/-rf.yml"
+  try 'a dash name' 'server/plugins/Eco/-rf.yml: a name starting with - or holding a newline is never pushed'
+  echo x >"$MC_HOME/server/plugins/Eco/two"$'\n'"lines.yml"
+  try 'a newline name' 'server/plugins/Eco/two\nlines.yml: a name starting with - or holding a newline is never pushed'
+  [ "$(live 'cat plugins/Eco/b.yml')" = 'b: 1' ]
+  live 'test ! -e plugins/Eco/link.yml && test ! -e plugins/Eco/logs && test ! -e plugins/Eco/data.db'
+  [ ! -e "$MC_HOME/.dev/runbook-9/journal.jsonl" ]
+}
+
+@test "rollback restores binary and CRLF files byte for byte" {
+  printf 'a\r\nb\r\n' >"$BATS_TEST_TMPDIR/crlf"
+  head -c 4096 /dev/urandom >"$BATS_TEST_TMPDIR/bin"
+  printf '\0\r\n\377' >>"$BATS_TEST_TMPDIR/bin"
+  docker cp -q "$BATS_TEST_TMPDIR/crlf" "$SFTP_CONTAINER:/home/mc/plugins/Eco/crlf.yml"
+  docker cp -q "$BATS_TEST_TMPDIR/bin" "$SFTP_CONTAINER:/home/mc/plugins/Eco/blob.dat"
+  docker exec "$SFTP_CONTAINER" chown "$SFTP_UID" /home/mc/plugins/Eco/crlf.yml /home/mc/plugins/Eco/blob.dat
+  git -C "$MC_HOME" switch -q main
+  cp "$BATS_TEST_TMPDIR/crlf" "$MC_HOME/server/plugins/Eco/crlf.yml"
+  cp "$BATS_TEST_TMPDIR/bin" "$MC_HOME/server/plugins/Eco/blob.dat"
+  git -C "$MC_HOME" add -A
+  git -C "$MC_HOME" commit -q -m 'live drift: 2 files'
+  git -C "$MC_HOME" switch -q issue/9
+  git -C "$MC_HOME" merge -q --no-edit main
+  printf 'x\r\ny\r\n' >"$MC_HOME/server/plugins/Eco/crlf.yml"
+  head -c 2048 /dev/urandom >"$MC_HOME/server/plugins/Eco/blob.dat"
+  printf 'rate: 2\n' >"$MC_HOME/server/plugins/Eco/config.yml"
+  gate_issue
+  run "$check" runbook push 9 </dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  sum() { docker exec "$SFTP_CONTAINER" sha256sum "/home/mc/plugins/Eco/$1" | cut -d' ' -f1; }
+  [ "$(sum blob.dat)" = "$(sha256sum <"$MC_HOME/server/plugins/Eco/blob.dat" | cut -d' ' -f1)" ]
+  run "$check" runbook rollback 9 </dev/null
+  [ "$status" -eq 0 ]
+  grep -v '^#' <<<"$output" >"$BATS_TEST_TMPDIR/rollback.sh"
+  bash -e "$BATS_TEST_TMPDIR/rollback.sh"
+  [ "$(sum crlf.yml)" = "$(sha256sum <"$BATS_TEST_TMPDIR/crlf" | cut -d' ' -f1)" ]
+  [ "$(sum blob.dat)" = "$(sha256sum <"$BATS_TEST_TMPDIR/bin" | cut -d' ' -f1)" ]
+}
