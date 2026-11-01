@@ -116,7 +116,8 @@ EOF
 }
 
 @test "a fix commit counts only once rebuilt; then the gate passes, confirms, and allows the docs" {
-  booted=$(git -C "$MC_HOME" rev-parse HEAD)
+  # HEAD has moved past the booted commit (record commits); the pod hasn't.
+  booted=$(label commit)
   red=$(rec 0 commit)
   sed -i 's/^difficulty=easy$/difficulty=normal/' "$MC_HOME/server/server.properties"
   git -C "$MC_HOME" commit -q -am 'fix: normal difficulty'
