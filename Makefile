@@ -3,7 +3,7 @@
 test: lint test-unit test-integration
 
 lint:
-	shellcheck bin/mc bin/path-guard bin/install-hooks bin/dev hooks/pre-commit hooks/pre-push hooks/pre-merge-commit docker/entrypoint.sh test/unit/stub/rclone test/integration/setup_suite.bash test/dev/prime test/dev/egress-probe test/dev/setup_suite.bash
+	shellcheck bin/mc bin/path-guard bin/install-hooks bin/dev bin/check hooks/pre-commit hooks/pre-push hooks/pre-merge-commit docker/entrypoint.sh test/unit/stub/rclone test/integration/setup_suite.bash test/dev/prime test/dev/egress-probe test/dev/setup_suite.bash
 	npx tsc --noEmit
 
 # bats and node --test side by side, to stay under 2s.

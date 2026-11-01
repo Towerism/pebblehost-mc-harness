@@ -1,11 +1,11 @@
 // bin/dev: run the server tree as an isolated, offline dev pod.
 // Exit 0 ok, 2 refused or failed. Never prompts.
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail, must } from './docker.ts';
-import { build, buildRelay, chooseJar, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
-import { bootTimeout, createJoin, createPod, formatBootReport, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
+import { build, buildRelay, chooseJar, dirtyHarness, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
+import { bootTimeout, createJoin, createPod, formatBootReport, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
 
 const USAGE = `usage: dev <command> [--pod ID] [options]
 
@@ -25,6 +25,10 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
                           proxy 127.0.0.1:N (default 25565) to the server
   console <command...>    run a server command over RCON through the pod's
                           relay and print its reply
+
+console and join mark the pod's volume explored: no run on it counts for the
+gate (bin/check run --fresh makes a new one). up and rebuild refuse
+uncommitted harness image or relay changes too.
 
 --pod defaults to dev. --jar picks the server jar when server/ has several
 at its root; --heap sets -Xms/-Xmx (both are kept for rebuild). --timeout S
@@ -81,11 +85,14 @@ function requireServer(p: Pod): string {
 }
 
 // Build first; only then replace the old pod (rebuild), so a failed build
-// leaves it running. Then create the pod, wait for "Done" and drop the
-// project's images no container uses any more.
-function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean) {
+// leaves it running. Then create the pod on a new volume generation (fresh:
+// made by bin/check run --fresh), wait for "Done" and drop the project's
+// images no container uses any more.
+export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean, fresh = false) {
   const src = refuseDirty(p.root);
   const jar = chooseJar(src, pf.jar);
+  const harness = dirtyHarness();
+  if (harness.length > 0) fail(`the harness has uncommitted image or relay changes; commit them first:\n${harness.join('\n')}`);
   const t0 = Date.now();
   const built = build(src, d, p.project);
   const relayTag = buildRelay(d, p.project, p.root);
@@ -100,7 +107,7 @@ function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean
   chmodSync(join(n.dir, 'pod.json'), 0o600);
   const since = Date.now() / 1000;
   const javaOpts = process.env.MC_JAVA_OPTS || (pf.heap ? `-Xms${pf.heap} -Xmx${pf.heap}` : undefined);
-  const spec = { tag: built.tag, relayTag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), javaOpts, memory: process.env.MC_DEV_MEMORY };
+  const spec = { tag: built.tag, relayTag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), generation: randomUUID(), fresh, commit: built.id.commit, source: built.id.source, javaOpts, memory: process.env.MC_DEV_MEMORY };
   createPod(p, spec, d);
   const secs = waitBoot(p, since, timeout);
   const pruned = pruneImages(d, p.project, [built.tag, relayTag]);
@@ -178,6 +185,7 @@ function main(argv: string[]) {
       }
       requireServer(p);
       if (state(d, n.join) !== null) fail(`join proxy already running; bin/dev join --stop first`);
+      markExplored(p, d);
       createJoin(p, o.port, SOCAT_IMAGE, d);
       say(`join: connect to 127.0.0.1:${o.port}`);
       break;
@@ -187,17 +195,10 @@ function main(argv: string[]) {
       if (command.trim() === '') fail(`console needs a server command\n${USAGE}`);
       const st = state(d, requireServer(p));
       if (st !== 'running') fail(`server of pod ${p.pod} is ${st}; run bin/dev restart`);
-      const rst = state(d, n.relay);
-      if (rst !== 'running') fail(`relay of pod ${p.pod} is ${rst ?? 'missing'}; bin/dev rebuild recreates it`);
-      const r = d(['exec', '-i', n.relay, 'node', '/relay/client.ts'], { input: `${JSON.stringify({ op: 'console', command })}\n` });
-      let reply: { ok?: boolean; reply?: string; error?: string } = {};
-      try {
-        reply = JSON.parse(r.stdout);
-      } catch {
-        fail(`relay gave no reply: ${(r.stderr || r.stdout).trim()}`);
-      }
-      if (reply.ok !== true || typeof reply.reply !== 'string') fail(reply.error ?? `relay reply without output: ${r.stdout.trim()}`);
-      process.stdout.write(reply.reply === '' || reply.reply.endsWith('\n') ? reply.reply : `${reply.reply}\n`);
+      markExplored(p, d);
+      const { reply } = relayRequest(p, d, { op: 'console', command });
+      if (typeof reply !== 'string') fail('relay reply without output');
+      process.stdout.write(reply === '' || reply.endsWith('\n') ? reply : `${reply}\n`);
       break;
     }
     default:
@@ -205,10 +206,12 @@ function main(argv: string[]) {
   }
 }
 
-try {
-  main(process.argv.slice(2));
-} catch (e) {
-  if (!(e instanceof DevError)) throw e;
-  process.stderr.write(`dev: ${e.message}\n`);
-  process.exit(2);
+if (import.meta.main) {
+  try {
+    main(process.argv.slice(2));
+  } catch (e) {
+    if (!(e instanceof DevError)) throw e;
+    process.stderr.write(`dev: ${e.message}\n`);
+    process.exit(2);
+  }
 }

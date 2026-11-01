@@ -1,0 +1,108 @@
+# Dev tier: bin/check against a pod of the suite's vanilla project. Runs after
+# dev.bats, which leaves no pod. The tests share state in file order. The
+# check is a real e2e one: the difficulty the running server reports.
+
+bats_require_minimum_version 1.5.0
+
+check() {
+  timeout 300 "$BATS_TEST_DIRNAME/../../bin/check" "$@" --issue 7 </dev/null
+}
+
+dev() {
+  timeout 300 "$DEV" "$@" </dev/null
+}
+
+# Field $2 of record $1 (0-based) in .verify/runs/issue-7.jsonl.
+rec() {
+  node -e 'const l = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n"); console.log(JSON.parse(l[process.argv[2]])[process.argv[3]])' "$MC_HOME/.verify/runs/issue-7.jsonl" "$1" "$2"
+}
+
+label() {
+  docker inspect --format "{{index .Config.Labels \"mc-harness.$1\"}}" "$SERVER"
+}
+
+@test "setup: a committed difficulty check importing #harness/dev, and an easy server" {
+  # dev.bats left pod.json with its --fixtures; start without, so every boot
+  # here has the same (empty) fixtures even after .dev/ is deleted below.
+  rm -rf "$MC_HOME/.dev"
+  # No import map: bin/check run's loader resolves #harness/*. .verify/ is tracked.
+  echo '{"type":"module"}' >"$MC_HOME/package.json"
+  echo '.dev/' >"$MC_HOME/.gitignore"
+  mkdir -p "$MC_HOME/checks/7-difficulty"
+  echo '{"kind":"e2e"}' >"$MC_HOME/checks/7-difficulty/profile.json"
+  cat >"$MC_HOME/checks/7-difficulty/difficulty.test.ts" <<'EOF'
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { dev } from '#harness/dev';
+
+test('the server runs on normal difficulty', async () => {
+  assert.equal(await dev.console('difficulty'), 'The difficulty is Normal');
+});
+EOF
+  echo 'difficulty=easy' >>"$MC_HOME/server/server.properties"
+  git -C "$MC_HOME" add -A
+  git -C "$MC_HOME" commit -q -m 'difficulty check, easy server'
+}
+
+@test "run refuses with exit 2 when no pod is up" {
+  run check run 7-difficulty
+  [ "$status" -eq 2 ]
+  [[ $output == *"pod dev is not up"* ]]
+}
+
+@test "run --fresh boots HEAD on a fresh volume and records a red from the container labels" {
+  run check run 7-difficulty --fresh
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ $output == *"The difficulty is Easy"* ]]
+  [[ $output == *"run: 7-difficulty failed (e2e, commit "*"(fresh))"* ]]
+  [ "$(rec 0 pass)" = false ]
+  [ "$(rec 0 fresh)" = true ]
+  [ "$(rec 0 explored)" = false ]
+  [ "$(rec 0 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
+  [ "$(rec 0 treeHash)" = "$(git -C "$MC_HOME" rev-parse HEAD:server)" ]
+  [ "$(rec 0 checkHash)" = "$(git -C "$MC_HOME" rev-parse HEAD:checks/7-difficulty)" ]
+  [ "$(rec 0 generation)" = "$(label generation)" ]
+  [ "$(rec 0 generation)" = "$(docker volume inspect --format '{{index .Labels "mc-harness.generation"}}' "mc-$PROJECT-dev-server")" ]
+  [ "$(rec 0 imageHash)" = "$(label image)" ]
+  [ "$(label fresh)" = true ]
+}
+
+@test "bin/dev console marks the volume explored, in the volume: later records say so even without .dev/" {
+  run dev console list
+  [ "$status" -eq 0 ]
+  docker exec "$SERVER" test -e /server/.mc-harness-explored
+  rm -rf "$MC_HOME/.dev"
+  run check run 7-difficulty
+  [ "$status" -eq 1 ]
+  [[ $output == *"explored: does not count as a red"* ]]
+  [ "$(rec 1 explored)" = true ]
+}
+
+@test "a fix commit counts only once rebuilt: the run before rebuild still reports the booted commit" {
+  booted=$(git -C "$MC_HOME" rev-parse HEAD)
+  sed -i 's/^difficulty=easy$/difficulty=normal/' "$MC_HOME/server/server.properties"
+  git -C "$MC_HOME" commit -q -am 'fix: normal difficulty'
+  run check run 7-difficulty
+  [ "$status" -eq 1 ]
+  [ "$(rec 2 commit)" = "$booted" ]
+  run dev rebuild
+  [ "$status" -eq 0 ]
+  run check run 7-difficulty
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(rec 3 pass)" = true ]
+  [ "$(rec 3 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
+  [ "$(rec 3 fresh)" = false ]
+  [ "$(rec 3 explored)" = false ]
+  [ "$(rec 3 generation)" != "$(rec 0 generation)" ]
+}
+
+@test "down --all leaves nothing labelled" {
+  run dev down --all
+  [ "$status" -eq 0 ]
+  [ -z "$(docker ps -aq --filter "label=mc-harness.project=$PROJECT")" ]
+  [ -z "$(docker volume ls -q --filter "label=mc-harness.project=$PROJECT")" ]
+  [ -z "$(docker network ls -q --filter "label=mc-harness.project=$PROJECT")" ]
+  [ -z "$(docker image ls -q --filter "label=mc-harness.project=$PROJECT")" ]
+}

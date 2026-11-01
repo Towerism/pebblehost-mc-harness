@@ -235,8 +235,9 @@ function consoleCli(env: Record<string, string>, ...args: string[]) {
   writeFileSync(fake, `#!/bin/sh
 echo "$*" >>"${dir}/argv"
 case "$1" in
-  inspect) case "$4" in *-server) st=$FAKE_SERVER ;; *) st=$FAKE_RELAY ;; esac; [ -n "$st" ] || exit 1; echo "$st" ;;
-  exec) cat >"${dir}/stdin"; printf '%s' "$FAKE_REPLY" ;;
+  inspect) case "$4" in *-server) st=$FAKE_SERVER ;; *) st=$FAKE_RELAY ;; esac; [ -n "$st" ] || exit 1
+    case "$3" in *Labels*) echo '{"mc-harness.generation":"g1"}' ;; *) echo "$st" ;; esac ;;
+  exec) [ "$2" = -i ] || exit 0; cat >"${dir}/stdin"; printf '%s' "$FAKE_REPLY" ;;
 esac
 `);
   chmodSync(fake, 0o755);
@@ -245,13 +246,15 @@ esac
   return { ...r, argv: read('argv'), stdin: read('stdin') };
 }
 
-test('bin/dev console sends the words as one console request through docker exec -i and prints the exact reply', () => {
+test('bin/dev console sends the words as one console request through docker exec -i, prints the exact reply and marks the volume explored', () => {
   const r = consoleCli({ FAKE_REPLY: '{"ok":true,"reply":"There are 0 of a max of 20 players online: "}\n' }, 'console', '--pod', 'p2', 'say', '--pod', 'hi');
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'There are 0 of a max of 20 players online: \n');
   assert.deepEqual(JSON.parse(r.stdin), { op: 'console', command: 'say --pod hi' });
-  const exec = r.argv.split('\n').find((l) => l.startsWith('exec '));
+  const exec = r.argv.split('\n').find((l) => l.startsWith('exec -i '));
   assert.match(exec ?? '', /^exec -i mc-[0-9a-f]{8}-p2-relay node \/relay\/client\.ts$/);
+  // A human touched the volume: its runs no longer count for the gate.
+  assert.match(r.argv, /^exec mc-[0-9a-f]{8}-p2-server touch \/server\/\.mc-harness-explored$/m);
   const dashed = consoleCli({ FAKE_REPLY: '{"ok":true,"reply":""}' }, 'console', '--', '--weird');
   assert.deepEqual([dashed.status, dashed.stdout, JSON.parse(dashed.stdin).command], [0, '', '--weird']);
 });

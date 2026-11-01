@@ -2,7 +2,7 @@
 // egress), a named volume at /server and a read-only /fixtures, plus the relay
 // container (src/relay/) on that network only, which holds the RCON connection. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
@@ -90,16 +90,21 @@ export function mergeFixtures(sources: string[], dest: string): string {
   return dirHash(dest);
 }
 
-export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string; memory?: string };
+// generation: a new id for each new volume; fresh: made by bin/check run
+// --fresh. Both are labels on the volume and the server container. commit
+// and source are the checkout this boot came from: on the container they
+// override the image's, which name whichever commit first built that tree.
+export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; generation: string; fresh: boolean; commit: string; source: string; javaOpts?: string; memory?: string };
 
 // Network, volume, server and relay. No published port: bin/dev join adds a
 // proxy. The RCON password reaches docker through its environment, never argv.
 export function createPod(p: Pod, s: Spec, d: Docker): void {
   const n = names(p);
   must(d, ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labelArgs(p), n.net]);
-  must(d, ['volume', 'create', ...labelArgs(p), n.vol]);
+  const gen = ['--label', `mc-harness.generation=${s.generation}`, '--label', `mc-harness.fresh=${s.fresh}`];
+  must(d, ['volume', 'create', ...labelArgs(p), ...gen, n.vol]);
   const run = ['run', '-d', '--name', n.server, '--hostname', `mc-${p.pod}`, '--network', n.net, ...labelArgs(p)];
-  run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`);
+  run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`, ...gen, '--label', `mc-harness.commit=${s.commit}`, '--label', `mc-harness.source=${s.source}`);
   run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', 'RCON_PASSWORD', '-e', `MC_JAR=${s.jar}`);
   for (const host of EGRESS_SINKS) run.push('--add-host', `${host}:127.0.0.1`);
   if (s.javaOpts) run.push('-e', `JAVA_OPTS=${s.javaOpts}`);
@@ -122,6 +127,60 @@ export function createJoin(p: Pod, port: number, image: string, d: Docker): void
   must(d, [...run, image, 'TCP-LISTEN:25565,fork,reuseaddr', `TCP:${n.server}:25565`]);
   must(d, ['network', 'connect', n.net, n.join]);
   must(d, ['start', n.join]);
+}
+
+// Send one request to the pod's relay daemon (src/relay/) and return its
+// reply; fails with the relay's reason when the reply is not ok.
+export function relayRequest(p: Pod, d: Docker, req: { op: string } & Record<string, unknown>): Record<string, unknown> {
+  const n = names(p);
+  const st = state(d, n.relay);
+  if (st !== 'running') fail(`relay of pod ${p.pod} is ${st ?? 'missing'}; bin/dev rebuild recreates it`);
+  const r = d(['exec', '-i', n.relay, 'node', '/relay/client.ts'], { input: `${JSON.stringify(req)}\n` });
+  let reply: { ok?: boolean; error?: string } & Record<string, unknown>;
+  try {
+    reply = JSON.parse(r.stdout);
+  } catch {
+    fail(`relay gave no reply: ${(r.stderr || r.stdout).trim()}`);
+  }
+  if (reply.ok !== true) fail(reply.error ?? `relay reply not ok: ${r.stdout.trim()}`);
+  return reply;
+}
+
+// A volume a human touched (bin/dev console, join) carries this marker, so
+// its runs don't count for the gate (G9). It lives in the volume itself:
+// it goes with the volume (rebuild, --fresh) and survives restart, reset and
+// a deleted .dev/.
+export const EXPLORED = '/server/.mc-harness-explored';
+
+export function markExplored(p: Pod, d: Docker): void {
+  must(d, ['exec', names(p).server, 'touch', EXPLORED]);
+}
+
+export function isExplored(p: Pod, d: Docker): boolean {
+  return d(['exec', names(p).server, 'test', '-e', EXPLORED]).status === 0;
+}
+
+// Every bin/check run on a volume appends a line here; the gate counts only
+// a red or green that was the first run on its volume, so no other check
+// can have changed the server before it.
+export const RUN_LOG = '/server/.mc-harness-runs';
+
+// Append `line nonce` to the volume's run log in one O_APPEND write (no
+// read-then-write race); returns the nonce.
+export function logRun(p: Pod, d: Docker, line: string): string {
+  const nonce = randomUUID();
+  const r = d(['exec', '-i', names(p).server, 'sh', '-c', `cat >>${RUN_LOG}`], { input: `${line} ${nonce}\n` });
+  if (r.status !== 0) fail(`cannot append to ${RUN_LOG}: ${r.stderr.trim()}`);
+  return nonce;
+}
+
+// Where the run's line sits in the log (-1: gone) and how many lines came
+// after it: read once the run is over, so a parallel run shows either way.
+export function runPosition(p: Pod, d: Docker, nonce: string): { index: number; after: number } {
+  const r = d(['exec', names(p).server, 'cat', RUN_LOG]);
+  const lines = r.status === 0 ? r.stdout.split('\n').filter(Boolean) : [];
+  const index = lines.findIndex((l) => l.endsWith(` ${nonce}`));
+  return { index, after: index < 0 ? 0 : lines.length - index - 1 };
 }
 
 function ids(d: Docker, kind: 'container' | 'volume' | 'network', filters: string[]): string[] {

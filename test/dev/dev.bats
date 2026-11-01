@@ -184,6 +184,17 @@ label() {
   [ "$output" = "$RELAY_LIST" ]
 }
 
+@test "a cached image built at another commit of the same tree reports the commit checked out" {
+  built=$(label commit)
+  git -C "$MC_HOME" commit -q --allow-empty -m 'docs only'
+  run dev rebuild
+  [ "$status" -eq 0 ]
+  [[ $output == *"image: cache hit"* ]]
+  [ "$(docker image inspect --format '{{index .Config.Labels "mc-harness.commit"}}' "$(docker inspect --format '{{.Config.Image}}' "$SERVER")")" = "$built" ]
+  [ "$(label commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
+  [ "$(label source)" = archive ]
+}
+
 @test "console refuses with exit 2 when the relay is gone" {
   docker rm -f "mc-$PROJECT-dev-relay" >/dev/null
   run dev console list

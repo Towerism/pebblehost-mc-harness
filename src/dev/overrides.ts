@@ -60,12 +60,20 @@ const content = (l: string) => l.trim() !== '' && !l.trimStart().startsWith('#')
 // inline comment is dropped). Returns null when the path isn't there.
 export function setYaml(text: string, path: string, value: string): string | null {
   const lines = text.split('\n');
+  const at = findYaml(lines, path);
+  if (at < 0) return null;
+  lines[at] = `${lines[at].slice(0, lines[at].indexOf(':') + 1)} ${value}${cr(lines[at])}`;
+  return lines.join('\n');
+}
+
+// The line index of a block-style YAML key by dotted path, or -1.
+export function findYaml(lines: string[], path: string): number {
   let start = 0;
   let end = lines.length;
   const segs = path.split('.');
   for (let s = 0; s < segs.length; s++) {
     const first = lines.slice(start, end).findIndex(content);
-    if (first < 0) return null;
+    if (first < 0) return -1;
     const level = indent(lines[start + first]);
     const re = new RegExp(`^(\\s*)(["']?)${segs[s].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\2\\s*:(\\s|$)`);
     let at = -1;
@@ -75,16 +83,12 @@ export function setYaml(text: string, path: string, value: string): string | nul
         break;
       }
     }
-    if (at < 0) return null;
-    if (s === segs.length - 1) {
-      lines[at] = `${lines[at].slice(0, lines[at].indexOf(':') + 1)} ${value}${cr(lines[at])}`;
-      return lines.join('\n');
-    }
+    if (at < 0 || s === segs.length - 1) return at;
     start = at + 1;
     end = start;
     while (end < lines.length && (!content(lines[end]) || indent(lines[end]) > level)) end++;
   }
-  return null;
+  return -1;
 }
 
 // The rewritten files for `cfg` (the server tree minus jars), one per file,
