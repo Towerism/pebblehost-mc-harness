@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# mc: manage the PebbleHost server's files over SFTP through rclone.
+# Credentials come from .env and reach rclone only as environment variables.
+set -euo pipefail
+
+home=${MC_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+env_file=${MC_ENV_FILE:-$home/.env}
+mirror=$home/server
+backups=$home/backups
+state=$home/.mc
+export TZ=UTC
+
+usage() {
+  cat <<'EOF'
+usage: mc <command> [path] [--all]
+
+  ls   [path]  list one remote directory level (dirs end in /)
+  pull <path>  copy remote path into server/<path>; unpushed local edits
+               there are moved to backups/<ts>/local/ first
+  diff <path>  diff remote path against server/<path>; exit 1 if they differ
+  push <path>  upload server/<path>; copies the remote version to
+               backups/<ts>/remote/ first, refuses if the remote changed
+               since the last pull of that same path
+
+pull, diff and push on the server root (no path or .) need --all.
+Paths are relative to the server root, e.g. plugins/CrateReloaded/config.yml
+Exit codes: 0 ok, 1 diff found differences, 2 error.
+EOF
+}
+
+die() { echo "mc: $*" >&2; exit 2; }
+
+# Parse KEY=VALUE lines without sourcing, so passwords with $ or quotes stay literal.
+load_env() {
+  [[ -f $env_file ]] || die "missing $env_file (see .env.example)"
+  local line key val
+  # Only .env decides the credentials, and they stay out of child environments.
+  unset "${!PEBBLE_@}"
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    key=${BASH_REMATCH[2]} val=${BASH_REMATCH[3]}
+    if [[ $val =~ ^\"(.*)\"$ || $val =~ ^\'(.*)\'$ ]]; then val=${BASH_REMATCH[1]}; fi
+    case $key in PEBBLE_*) printf -v "$key" '%s' "$val" ;; esac
+  done <"$env_file"
+  local missing=() v
+  for v in PEBBLE_SFTP_HOST PEBBLE_SFTP_USER PEBBLE_PANEL_PASSWORD; do
+    [[ -n ${!v:-} ]] || missing+=("$v")
+  done
+  ((${#missing[@]} == 0)) || die "missing in $env_file: ${missing[*]}"
+  declare -g +x "${!PEBBLE_@}"
+}
+
+configure_rclone() {
+  command -v rclone >/dev/null || die "rclone not installed"
+  export RCLONE_CONFIG_PEBBLE_TYPE=sftp
+  export RCLONE_CONFIG_PEBBLE_HOST=$PEBBLE_SFTP_HOST
+  export RCLONE_CONFIG_PEBBLE_PORT=${PEBBLE_SFTP_PORT:-2022}
+  export RCLONE_CONFIG_PEBBLE_USER=$PEBBLE_SFTP_USER
+  # Pterodactyl-style SFTP has no shell; skip rclone's shell probing and hashing.
+  export RCLONE_CONFIG_PEBBLE_SHELL_TYPE=none
+  export RCLONE_CONFIG_PEBBLE_DISABLE_HASHCHECK=true
+  export RCLONE_CONFIG_PEBBLE_KNOWN_HOSTS_FILE=none
+  RCLONE_CONFIG_PEBBLE_PASS=$(printf '%s' "$PEBBLE_PANEL_PASSWORD" | rclone obscure -)
+  export RCLONE_CONFIG_PEBBLE_PASS
+  export RCLONE_CONFIG=/dev/null
+}
+
+# Normalize a server-relative path; reject anything that could escape the root.
+clean_path() {
+  local p=$1
+  [[ $p == /* ]] && die "path must be relative to the server root: $p"
+  p=${p#./}
+  p=${p%/}
+  [[ /$p/ == */../* ]] && die "path must not contain '..': $p"
+  printf '%s' "$p"
+}
+
+remote() { printf 'pebble:%s' "$1"; }
+
+state_file() { printf '%s/%s/%s' "$state" "$1" "$(printf '%s' "$2" | sha1sum | cut -d' ' -f1)"; }
+
+# Path, size and modtime of every remote file under $1; SFTP gives no hashes.
+snapshot() { rclone lsf -R --files-only --format pst --separator '|' "$(remote "$1")" | sort; }
+
+# Checksums of the local mirror under $1, to tell unpushed edits from a clean pull.
+local_manifest() { find "$mirror/$1" -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha1sum; }
+
+new_backup() { mkdir -p "$backups" && mktemp -d "$backups/$(date +%Y%m%d-%H%M%S)-XXXX"; }
+
+cmd_ls() { rclone lsf "$(remote "$1")"; }
+
+cmd_pull() {
+  local p=$1 stash
+  mkdir -p "$state/remote" "$state/local"
+  # Snapshot before copying: a remote change during the copy then makes push refuse instead of overwrite.
+  snapshot "$p" >"$tmp/snapshot"
+  if [[ -e $mirror/$p ]]; then
+    if [[ "$(local_manifest "$p")" != "$(cat "$(state_file local "$p")" 2>/dev/null)" ]]; then
+      stash=$(new_backup)/local/$p
+      mkdir -p "$(dirname "$stash")"
+      mv "$mirror/$p" "$stash"
+      echo "moved unpushed local edits to ${stash#"$home"/}"
+    fi
+    rm -rf "${mirror:?}/$p"
+  fi
+  # --ignore-times: SFTP modtimes have 1s precision, so an equal-size edit can look unchanged.
+  rclone copyto --ignore-times "$(remote "$p")" "$mirror/$p"
+  mv "$tmp/snapshot" "$(state_file remote "$p")"
+  local_manifest "$p" >"$(state_file local "$p")"
+  echo "pulled ${p:-.} -> server/$p"
+}
+
+cmd_diff() {
+  local p=$1 rc=0
+  [[ -e $mirror/$p ]] || die "server/$p not found; pull it first"
+  rclone copyto "$(remote "$p")" "$tmp/remote/$p" || die "could not download '$p'"
+  diff -ruN "$tmp/remote/$p" "$mirror/$p" | sed -e "s#$tmp/remote/#remote/#" -e "s#$mirror/#server/#" || rc=$?
+  return "$rc"
+}
+
+cmd_push() {
+  local p=$1 snap backup
+  [[ -e $mirror/$p ]] || die "server/$p not found; pull it first"
+  snap=$(state_file remote "$p")
+  [[ -f $snap ]] || die "no pull recorded for '$p'; pull it first"
+  snapshot "$p" >"$tmp/snapshot"
+  diff -q "$snap" "$tmp/snapshot" >/dev/null ||
+    die "remote '$p' changed since the last pull; pull again (your edits are kept in backups/) and redo them"
+  backup=$(new_backup)
+  rclone copyto "$(remote "$p")" "$backup/remote/$p"
+  rclone copyto --ignore-times "$mirror/$p" "$(remote "$p")" ||
+    die "upload failed partway; the previous remote copy is in ${backup#"$home"/}/remote/$p"
+  snapshot "$p" >"$snap"
+  local_manifest "$p" >"$(state_file local "$p")"
+  echo "pushed server/$p -> ${p:-.} (previous remote copy in ${backup#"$home"/}/remote/$p)"
+}
+
+main() {
+  local cmd=${1:-} path="" all=0 arg
+  [[ -n $cmd ]] || { usage; exit 2; }
+  shift
+  for arg in "$@"; do
+    case $arg in
+      --all) all=1 ;;
+      -h | --help) usage; exit 0 ;;
+      -*) die "unknown option: $arg" ;;
+      *) [[ -z $path ]] || die "one path at a time"; path=$(clean_path "$arg") ;;
+    esac
+  done
+  [[ $path == . ]] && path=""
+  case $cmd in
+    ls) ;;
+    pull | diff | push) [[ -n $path || $all == 1 ]] || die "$cmd on the server root needs --all" ;;
+    -h | --help | help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  load_env
+  configure_rclone
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  case $cmd in
+    ls) cmd_ls "$path" ;;
+    pull) cmd_pull "$path" ;;
+    diff) cmd_diff "$path" ;;
+    push) cmd_push "$path" ;;
+  esac
+}
+
+main "$@"
