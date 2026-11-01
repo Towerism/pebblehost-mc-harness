@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake rclone for unit tests: records calls, never touches the network.
+echo "rclone $*" >>"$STUB_LOG"
+env | grep '^RCLONE_CONFIG_PEBBLE_' | sort >"$STUB_ENV"
+case $1 in
+  obscure) cat >"$STUB_OBSCURED"; echo OBSCURED ;;
+  lsf) cat "$STUB_LSF" 2>/dev/null || true ;;
+  copyto) src=${*: -2:1} dst=${*: -1}; [[ $src == pebble:* ]] && mkdir -p "$(dirname "$dst")" && echo remote >"$dst" ;;
+esac
+exit 0
