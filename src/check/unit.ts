@@ -5,7 +5,9 @@
 // bare-text check.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { findYaml } from '../dev/overrides.ts';
+import { livePull, onLive } from './live.ts';
 
 export { test } from 'node:test';
 
@@ -45,11 +47,16 @@ export function readValue(text: string, file: string, path: string): string {
 }
 
 // The file as committed at MC_COMMIT (the run's commit), never the working
-// tree: an untracked or ignored file is not bare text the fix can commit.
+// tree: an untracked or ignored file is not bare text the fix can commit. On
+// the live target, the live server's copy.
 export function bareText(file: string, path: string, literal: string): void {
   const { MC_HOME: home, MC_COMMIT: commit } = process.env;
   if (!home || !commit) throw new Error('MC_HOME or MC_COMMIT is not set: run checks with bin/check run');
   if (file.startsWith('/') || file.split('/').includes('..')) throw new Error(`bad server path ${file}`);
+  if (onLive()) {
+    assert.equal(readValue(readFileSync(livePull(file), 'utf8'), file, path), literal, `${file} ${path} (live)`);
+    return;
+  }
   const r = spawnSync('git', ['-C', home, 'show', `${commit}:server/${file}`], { encoding: 'utf8', env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   if (r.status !== 0) throw new Error(`server/${file} is not tracked at ${commit.slice(0, 12)}`);
   assert.equal(readValue(r.stdout, file, path), literal, `${file} ${path}`);

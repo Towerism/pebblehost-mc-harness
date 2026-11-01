@@ -82,7 +82,7 @@ test('dev.restart and dev.reset refuse a check that did not declare restart or e
   assert.equal(checkEnv(root, 'x', 'dev', 'c', P({ exclusive: true })).MC_RESTART_OK, '1');
 });
 
-const T = (o: Partial<Timings> = {}): Timings => ({ started: 't', commit: 'c', image: { cacheHit: true, seconds: 0.1 }, unit: [{ check: 'u', pass: true, seconds: 0.3 }], profiles: [{ pod: 'suite0', key: 'k', reset: 'none', boot: 12.34, teardown: 1, tests: [{ check: 'a', pass: true, seconds: 0.5 }, { check: 'b', pass: false, seconds: 0.7 }] }], refused: [{ check: 'c', reason: 'fixture conflict: x\nmore' }], total: 20, budget: null, over: null, ...o });
+const T = (o: Partial<Timings> = {}): Timings => ({ started: 't', target: 'dev', commit: 'c', image: { cacheHit: true, seconds: 0.1 }, unit: [{ check: 'u', pass: true, seconds: 0.3 }], profiles: [{ pod: 'suite0', key: 'k', reset: 'none', boot: 12.34, teardown: 1, tests: [{ check: 'a', pass: true, seconds: 0.5 }, { check: 'b', pass: false, seconds: 0.7 }] }], refused: [{ check: 'c', reason: 'fixture conflict: x\nmore' }], total: 20, budget: null, over: null, ...o });
 
 test('formatTimings prints every phase, the budget and OVER BUDGET', () => {
   const out = formatTimings(T());

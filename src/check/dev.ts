@@ -1,15 +1,18 @@
 // Harness API for e2e checks, imported as '#harness/dev'. It talks to the pod
 // that bin/check run names in MC_POD under MC_HOME; console calls go through
-// the pod's relay and do not mark the volume explored.
+// the pod's relay and do not mark the volume explored. On the live target
+// (bin/check run --target live) file, log and database reads come from the
+// live server over SFTP, and the console and restarts are refused (live.ts).
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { docker as d, must } from '../dev/docker.ts';
 import { names, podOf, relayRequest, restartServer } from '../dev/pod.ts';
+import { livePull, onLive, refuseOnLive } from './live.ts';
 
 function pod() {
-  if (process.env.MC_TARGET !== undefined && process.env.MC_TARGET !== 'dev') throw new Error(`target ${process.env.MC_TARGET} is not supported`);
+  if (process.env.MC_TARGET !== undefined && process.env.MC_TARGET !== 'dev') throw new Error(`target ${process.env.MC_TARGET} has no pod`);
   if (!process.env.MC_HOME) throw new Error('MC_HOME is not set: run checks with bin/check run');
   return podOf(process.env.MC_HOME, process.env.MC_POD || 'dev');
 }
@@ -25,6 +28,7 @@ export type Row = Record<string, unknown>;
 // Only a check whose profile declares restart or exclusive may restart its
 // pod: the suite schedules those last on a shared pod, or alone.
 function restart(reset: boolean): void {
+  if (onLive()) refuseOnLive(`dev.${reset ? 'reset' : 'restart'}()`, 'console');
   if (process.env.MC_RESTART_OK !== '1') throw new Error(`dev.${reset ? 'reset' : 'restart'}() needs "restart": true or "exclusive": true in the check's profile.json`);
   restartServer(pod(), d, reset);
 }
@@ -40,27 +44,46 @@ export const dev = {
   },
   // The exact RCON reply.
   async console(command: string): Promise<string> {
+    if (onLive()) refuseOnLive('dev.console()', 'console');
     return String(relayRequest(pod(), d, { op: 'console', command }).reply);
   },
-  // Server console output since `since` (a Date or epoch milliseconds).
+  // Server console output since `since` (a Date or epoch milliseconds). On
+  // live: the whole current logs/latest.log (its lines carry no date).
   async logSince(since: Date | number): Promise<string> {
+    if (onLive()) return readFileSync(livePull('logs/latest.log'), 'utf8');
     const ms = typeof since === 'number' ? since : since.getTime();
     const r = d(['logs', '--since', (ms / 1000).toFixed(3), names(pod()).server]);
     if (r.status !== 0) throw new Error(`docker logs failed: ${r.stderr.trim()}`);
     return r.stdout + r.stderr;
   },
   async file(path: string): Promise<string> {
+    if (onLive()) return readFileSync(livePull(serverPath(path).slice('/server/'.length)), 'utf8');
     return must(d, ['exec', names(pod()).server, 'cat', serverPath(path)]);
   },
   // Rows of a read-only query on a copy of the database, taken with its -wal
   // and -shm so uncheckpointed writes are included.
   async sqlite(path: string, sql: string, ...params: (string | number | null)[]): Promise<Row[]> {
-    const server = names(pod()).server;
     const tmp = mkdtempSync(join(tmpdir(), 'check-sqlite-'));
     try {
       const db = join(tmp, basename(path));
-      must(d, ['cp', `${server}:${serverPath(path)}`, db]);
-      for (const ext of ['-wal', '-shm']) d(['cp', `${server}:${serverPath(path)}${ext}`, `${db}${ext}`]);
+      if (onLive()) {
+        const rel = serverPath(path).slice('/server/'.length);
+        copyFileSync(livePull(rel), db);
+        for (const ext of ['-wal', '-shm']) {
+          // Usually absent on live once the plugin checkpointed.
+          let got: string | null = null;
+          try {
+            got = livePull(`${rel}${ext}`);
+          } catch {
+            got = null;
+          }
+          if (got && existsSync(got)) copyFileSync(got, `${db}${ext}`);
+        }
+      } else {
+        const server = names(pod()).server;
+        must(d, ['cp', `${server}:${serverPath(path)}`, db]);
+        for (const ext of ['-wal', '-shm']) d(['cp', `${server}:${serverPath(path)}${ext}`, `${db}${ext}`]);
+      }
       const conn = new DatabaseSync(db, { readOnly: true });
       try {
         return conn.prepare(sql).all(...params).map((row) => ({ ...row }));

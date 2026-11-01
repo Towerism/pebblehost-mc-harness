@@ -90,7 +90,8 @@ test('refusal cases of the gate table', () => {
   // A no-op server commit, a rebuild, and the server repaired by hand on the console.
   refused([red, rec({ pass: true, commit: N, generation: 'g2', fresh: false, explored: true })], /^G9: the green's volume g2 was explored/);
   refused([red, green], /^G7: HEAD does not descend/, { head: X });
-  refused([red, { ...green, target: 'live' as 'dev' }], /^G1: the green run is live\/e2e/);
+  // A live run is no green.
+  refused([red, { ...green, target: 'live' }], /^G1: no passing run of 7-x/);
   // Lines copied from another issue's file.
   refused([{ ...red, issue: 6 }, green], /^G1: the red record belongs to issue 6, not 7/);
   // Records edited or never committed: HEAD's file must hold them byte for byte.
