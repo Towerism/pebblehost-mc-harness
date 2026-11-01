@@ -123,6 +123,11 @@ function buildFixtures(sources: string[], dest: string, sqlite: Record<string, s
     const sql = sqlite[target];
     const prev = from.get(target);
     if (prev !== undefined) fail(`fixture conflict: ${target} is both a file in ${prev} and built from ${sql}`);
+    // SQLite would delete or reuse these, but they are already hashed.
+    for (const ext of ['-journal', '-wal', '-shm']) {
+      const side = from.get(`${target}${ext}`);
+      if (side !== undefined) fail(`fixture conflict: ${target}${ext} is a file in ${side} beside the database built from ${sql}`);
+    }
     const st = lstatSync(sql, { throwIfNoEntry: false });
     if (st?.isSymbolicLink()) fail(`symlink refused: ${sql}`);
     if (!st?.isFile()) fail(`sqlite fixture ${sql}: not a file`);

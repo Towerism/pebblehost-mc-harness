@@ -428,6 +428,11 @@ test('mergeFixtures: sqlite builds each database from its SQL; the hash covers t
   assert.notEqual(h, mergeFixtures([fx], join(tmp(), 'changed'), { 'plugins/E/data.db': join(sql, 'economy.sql') }));
   assert.throws(() => mergeFixtures([fx], join(tmp(), 'broken'), { 'b.db': join(sql, 'broken.sql') }), new RegExp(`sqlite fixture ${join(sql, 'broken.sql')}: .*syntax error`));
   assert.throws(() => mergeFixtures([fx], join(tmp(), 'clash'), { 'plugins/E/config.yml': join(sql, 'economy.sql') }), /fixture conflict: plugins\/E\/config\.yml is both a file in .* and built from .*economy\.sql/);
+  for (const ext of ['-journal', '-wal', '-shm']) {
+    const side = tmp();
+    write(side, { [`plugins/E/data.db${ext}`]: 'x' });
+    assert.throws(() => mergeFixtures([side], join(tmp(), 'side'), { 'plugins/E/data.db': join(sql, 'economy.sql') }), new RegExp(`fixture conflict: plugins/E/data\\.db${ext} is a file in .* beside the database built from .*economy\\.sql`), ext);
+  }
   assert.throws(() => mergeFixtures([fx], join(tmp(), 'under'), { 'plugins/E/config.yml/x.db': join(sql, 'economy.sql') }), /sqlite fixture .*economy\.sql: /);
   assert.throws(() => mergeFixtures([fx], join(tmp(), 'gone'), { 'g.db': join(sql, 'missing.sql') }), (e) => e instanceof DevError && /sqlite fixture .*missing\.sql: not a file/.test(e.message));
   symlinkSync(join(sql, 'economy.sql'), join(sql, 'link.sql'));
