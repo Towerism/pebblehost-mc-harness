@@ -57,7 +57,7 @@ export function runCheck(o: RunOpts, d: Docker): Run {
     const l = labels(d, server);
     const gen = l['mc-harness.generation'] ?? '';
     const containerId = d(['inspect', '--format', '{{.Id}}', server]).stdout.trim();
-    id = { source: l['mc-harness.source'] ?? '', commit: l['mc-harness.commit'] ?? '', treeHash: l['mc-harness.tree'] ?? '', harnessHash: l['mc-harness.harness'] ?? '', imageHash: l['mc-harness.image'] ?? '', fixturesHash: l['mc-harness.fixtures'] ?? '', generation: gen, fresh: l['mc-harness.fresh'] === 'true', explored: isExplored(p, gen), containerId };
+    id = { source: l['mc-harness.source'] ?? '', commit: l['mc-harness.commit'] ?? '', treeHash: l['mc-harness.tree'] ?? '', harnessHash: l['mc-harness.harness'] ?? '', imageHash: l['mc-harness.image'] ?? '', fixturesHash: l['mc-harness.fixtures'] ?? '', generation: gen, fresh: l['mc-harness.fresh'] === 'true', explored: isExplored(p, d), containerId };
   } else {
     if (o.fresh) fail('--fresh is for e2e checks; a bare-text check needs no pod');
     const src = source(o.root);

@@ -37,7 +37,7 @@ export function project(files: Record<string, string>): string {
 }
 
 // A docker stand-in for one running pod: labels from FAKE_LABELS, files from
-// FAKE_FS (exec cat and cp), the relay's reply from FAKE_REPLY, logs from
+// FAKE_FS (exec cat, test -e, touch and cp), the relay's reply from FAKE_REPLY, logs from
 // FAKE_LOG. FAKE_SERVER empty: no such container.
 export function fakeDocker(): string {
   const f = join(tmp(), 'docker');
@@ -45,7 +45,8 @@ export function fakeDocker(): string {
 case "$1" in
   inspect) [ -n "$FAKE_SERVER" ] || exit 1
     case "$3" in *Labels*) echo "$FAKE_LABELS" ;; *.Id*) echo cid123 ;; *) echo "$FAKE_SERVER" ;; esac ;;
-  exec) case "$2" in -i) cat >/dev/null; printf '%s' "$FAKE_REPLY" ;; *) cat "$FAKE_FS/\${4#/server/}" ;; esac ;;
+  exec) case "$2" in -i) cat >/dev/null; printf '%s' "$FAKE_REPLY" ;; *)
+    case "$3" in cat) cat "$FAKE_FS/\${4#/server/}" ;; touch) touch "$FAKE_FS/\${4#/server/}" ;; test) [ -e "$FAKE_FS/\${5#/server/}" ] ;; esac ;; esac ;;
   cp) src=\${2#*:/server/}; [ -e "$FAKE_FS/$src" ] || exit 1; cp "$FAKE_FS/$src" "$3" ;;
   logs) printf '%s\\n' "$FAKE_LOG" ;;
 esac
@@ -58,6 +59,7 @@ export const LABELS = { 'mc-harness.source': 'archive', 'mc-harness.commit': 'c0
 
 export function check(root: string, env: Record<string, string>, ...args: string[]) {
   const fs = join(root, 'fakefs');
+  mkdirSync(fs, { recursive: true });
   return spawnSync(join(HARNESS_ROOT, 'bin/check'), args, {
     env: { ...ENV, MC_HOME: root, MC_DOCKER: fakeDocker(), FAKE_SERVER: 'running', FAKE_LABELS: JSON.stringify(LABELS), FAKE_FS: fs, ...env },
     encoding: 'utf8',
