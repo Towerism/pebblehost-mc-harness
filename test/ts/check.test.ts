@@ -52,6 +52,10 @@ test('difficulty', async () => {
   assert.deepEqual([red.runIndex, green.runIndex], [0, 1]);
   assert.match(readFileSync(join(root, 'fakefs/.mc-harness-runs'), 'utf8'), /^\S+ issue-3 3-motd [0-9a-f-]{36}\n\S+ issue-3 3-motd [0-9a-f-]{36}\n$/);
   assert.deepEqual([red.concurrent, green.concurrent], [false, false]);
+  // Every bot leaves before and after each run; that is no check run and no explored mark.
+  const ops = readFileSync(join(root, 'fakefs/.relay-requests'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).op);
+  assert.deepEqual(ops, ['bot.quitAll', 'console', 'bot.quitAll', 'bot.quitAll', 'console', 'bot.quitAll']);
+  assert.deepEqual([red.explored, green.explored], [false, false]);
   assert.match(red.toolHash, /^[0-9a-f]{64}$/);
   assert.match(red.output, /The difficulty is Easy/);
   assert.ok(!Number.isNaN(Date.parse(green.time)));

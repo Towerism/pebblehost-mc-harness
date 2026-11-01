@@ -1,10 +1,12 @@
 // Relay daemon: PID 1 of a pod's relay container, behind tini. Each connection
 // to its unix socket carries one JSON request line and gets one JSON reply
-// line. Requests are dispatched by `op` to a table of handlers; it owns the
+// line. Requests are dispatched by `op` to a table of handlers: console (the
 // pod's RCON connection, opened on first use and again after the server
-// restarts. Env: RCON_HOST, RCON_PASSWORD, RCON_PORT (25575), RELAY_SOCKET.
+// restarts) and bot.* (mineflayer sessions by name, bots.ts). Env: RCON_HOST,
+// RCON_PASSWORD, RCON_PORT (25575), GAME_PORT (25565), RELAY_SOCKET.
 import { chmodSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
+import { botOps } from './bots.ts';
 import { Rcon } from './rcon.ts';
 
 export const SOCKET = '/run/relay.sock';
@@ -110,7 +112,13 @@ export function serve(path: string, ops: Record<string, Handler>, idleMs = 30_00
 if (import.meta.main) {
   const need = (k: string) => process.env[k] || (process.stderr.write(`relay: ${k} is not set\n`), process.exit(2));
   const rcon = rconSession({ host: need('RCON_HOST'), port: Number(process.env.RCON_PORT || 25575), password: need('RCON_PASSWORD') });
-  const server = await serve(process.env.RELAY_SOCKET || SOCKET, { ...consoleOps(rcon) });
+  // mineflayer is installed only in the relay image; without it (the unit
+  // tests run this file on the host) the daemon serves console alone.
+  const bots = await import('mineflayer').then(
+    ({ createBot }) => botOps(createBot, { host: need('RCON_HOST'), port: Number(process.env.GAME_PORT || 25565), version: '26.1' }),
+    () => ({}),
+  );
+  const server = await serve(process.env.RELAY_SOCKET || SOCKET, { ...consoleOps(rcon), ...bots });
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     process.on(sig, () => {
       server.close();

@@ -25,8 +25,11 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
                           proxy 127.0.0.1:N (default 25565) to the server
   console <command...>    run a server command over RCON through the pod's
                           relay and print its reply
+  bot join NAME | chat NAME TEXT... | wait NAME REGEX [--timeout S]
+      | quit NAME | list  headless offline players in the pod's relay; a bot
+                          joined by one call stays for the next
 
-console and join mark the pod's volume explored: no run on it counts for the
+console, bot and join mark the pod's volume explored: no run on it counts for the
 gate (bin/check run --fresh makes a new one). up and rebuild refuse
 uncommitted harness image or relay changes too.
 
@@ -47,7 +50,7 @@ function parse(argv: string[]): { cmd: string; o: Opts } {
     const val = () => rest[++i] ?? fail(`${a} needs a value\n${USAGE}`);
     // console: options first; the first other word (or what follows --)
     // starts the server command, kept verbatim.
-    if (cmd === 'console' && (a === '--' || !a.startsWith('-'))) {
+    if ((cmd === 'console' || cmd === 'bot') && (a === '--' || !a.startsWith('-'))) {
       o.words = rest.slice(a === '--' ? i + 1 : i);
       break;
     }
@@ -202,6 +205,40 @@ function main(argv: string[]) {
       const { reply } = relayRequest(p, d, { op: 'console', command });
       if (typeof reply !== 'string') fail('relay reply without output');
       process.stdout.write(reply === '' || reply.endsWith('\n') ? reply : `${reply}\n`);
+      break;
+    }
+    case 'bot': {
+      // --timeout S may follow the bot's words too (bot wait NAME RE --timeout 45).
+      const words = [...o.words];
+      const at = words.indexOf('--timeout');
+      let timeout = o.timeout;
+      if (at >= 0) {
+        timeout = Number(words[at + 1]);
+        if (!(timeout > 0)) fail(`bad --timeout\n${USAGE}`);
+        words.splice(at, 2);
+      }
+      const [sub, name, ...rest] = words;
+      const st = state(d, requireServer(p));
+      if (st !== 'running') fail(`server of pod ${p.pod} is ${st}; run bin/dev restart`);
+      if (sub === 'list' && name === undefined) {
+        const bots = relayRequest(p, d, { op: 'bot.list' }).bots as string[];
+        say(bots.length ? bots.join('\n') : 'no bots');
+        break;
+      }
+      if (!['join', 'chat', 'wait', 'quit'].includes(sub ?? '') || name === undefined) fail(`bot needs join NAME, chat NAME TEXT, wait NAME REGEX, quit NAME or list\n${USAGE}`);
+      markExplored(p, d);
+      if (sub === 'join') relayRequest(p, d, { op: 'bot.join', name });
+      if (sub === 'quit') relayRequest(p, d, { op: 'bot.quit', name });
+      if (sub === 'chat') {
+        if (rest.length === 0) fail('bot chat needs the text to send');
+        relayRequest(p, d, { op: 'bot.chat', name, message: rest.join(' ') });
+      }
+      if (sub === 'wait') {
+        if (rest.length === 0) fail('bot wait needs a regex');
+        say(String(relayRequest(p, d, { op: 'bot.waitMessage', name, regex: rest.join(' '), timeoutMs: (timeout ?? 10) * 1000 }).line));
+        break;
+      }
+      say(`bot: ${name} ${sub === 'join' ? 'joined' : sub === 'quit' ? 'quit' : 'sent'}`);
       break;
     }
     default:

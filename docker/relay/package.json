@@ -1,0 +1,8 @@
+{
+  "name": "mc-harness-relay",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "mineflayer": "4.39.0"
+  }
+}

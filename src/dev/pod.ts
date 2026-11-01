@@ -112,7 +112,7 @@ export function createPod(p: Pod, s: Spec, d: Docker): void {
   run.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '4096', '--stop-timeout', '60', s.tag);
   must(d, run, { RCON_PASSWORD: s.rconPassword });
   const relay = ['run', '-d', '--name', n.relay, '--hostname', `relay-${p.pod}`, '--network', n.net, ...labelArgs(p), '--init'];
-  relay.push('-e', 'RCON_PASSWORD', '-e', `RCON_HOST=${n.server}`, '--user', '1000:1000', '--read-only', '--tmpfs', '/run:rw,nosuid,nodev,noexec,size=1m,uid=1000,gid=1000,mode=0700');
+  relay.push('-e', 'RCON_PASSWORD', '-e', `RCON_HOST=${n.server}`, '--user', '1000:1000', '--read-only', '--tmpfs', '/run:rw,nosuid,nodev,noexec,size=1m,uid=1000,gid=1000,mode=0700', '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=16m,uid=1000,gid=1000,mode=0700');
   relay.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256', s.relayTag);
   must(d, relay, { RCON_PASSWORD: s.rconPassword });
 }

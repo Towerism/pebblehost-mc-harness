@@ -15,6 +15,7 @@ const METRICS = 'metrics: no network in the pod';
 export const OVERRIDES: readonly Override[] = [
   { file: 'server.properties', key: 'online-mode', value: 'false', why: 'no Mojang session servers offline' },
   { file: 'config/paper-global.yml', key: 'update-checker.enabled', value: 'false', why: UPDATE },
+  { file: 'bukkit.yml', key: 'settings.connection-throttle', value: '-1', why: 'bots join back to back from one address' },
   { file: 'plugins/bStats/config.yml', key: 'enabled', value: 'false', why: METRICS },
   { file: 'plugins/Votifier/config.yml', key: 'port', value: '-1', why: 'vote listener off: a negative port disables it' },
   { file: 'plugins/Minepacks/config.yml', key: 'Misc.AutoUpdate.Enabled', value: 'false', why: UPDATE },

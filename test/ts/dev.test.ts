@@ -329,6 +329,7 @@ test('createPod: internal IPv4-only network without a gateway, labelled volume, 
   }
   assert.equal(relay.filter((a) => a === '--network').length, 1);
   assert.ok(relay.some((a) => a.startsWith('/run:') && a.includes('uid=1000') && a.includes('noexec')));
+  assert.ok(relay.some((a) => a.startsWith('/tmp:') && a.includes('uid=1000') && a.includes('noexec')));
   assert.ok(!relay.some((a) => a.includes('pw') || a === '-p' || a.startsWith('--publish')), 'password or port in relay argv');
   assert.deepEqual(envs[3], { RCON_PASSWORD: 'pw' });
   assert.equal(relay[relay.length - 1], 'mc-relay:r1');

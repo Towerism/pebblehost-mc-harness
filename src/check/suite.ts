@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { boot } from '../dev/cli.ts';
 import { DevError, fail, must, type Docker } from '../dev/docker.ts';
 import { dirtyServer, privateDir, source, walk } from '../dev/image.ts';
-import { mergeFixtures, names, podOf, readPodFile, removePod, restartServer, type Pod } from '../dev/pod.ts';
+import { mergeFixtures, names, podOf, readPodFile, relayRequest, removePod, restartServer, type Pod } from '../dev/pod.ts';
 import { fixtureDirs, isData, readProfile, type Profile } from './profile.ts';
 import { checkEnv, checkHash, committedTests, refuseDirtyHarness, runTests } from './run.ts';
 import { readBudget, writeTimings, type Timings } from './timings.ts';
@@ -128,6 +128,8 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
       const b = boot(p, { fixtures, jar: o.jar ?? dev.jar, heap: o.heap ?? dev.heap }, undefined, true);
       timings.image ??= { cacheHit: b.cacheHit, seconds: b.buildSeconds };
       const tests = g.checks.map((id, j) => {
+        // Bot players from the previous check leave first.
+        if (j > 0) relayRequest(p, d, { op: 'bot.quitAll' });
         if (j > 0 && g.reset === 'reset') restartServer(p, d, true);
         if (j > 0 && g.reset === 'restore') must(d, ['exec', names(p).server, 'cp', '-R', '/fixtures/.', '/server/']);
         return test(id, p.pod);

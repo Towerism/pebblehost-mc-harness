@@ -36,7 +36,8 @@ export function project(files: Record<string, string>): string {
 }
 
 // A docker stand-in for one running pod: labels from FAKE_LABELS, files from
-// FAKE_FS (exec cat, test -e, touch, cp and the run log), the relay's reply from
+// FAKE_FS (exec cat, test -e, touch, cp and the run log), relay requests
+// logged to FAKE_FS/.relay-requests (bot.quitAll always ok), the relay's reply from
 // FAKE_REPLY, logs from FAKE_LOG. FAKE_SERVER empty: no such container. The
 // values are baked into the script: checks run with an allow-listed env.
 export function fakeDocker(fake: Record<string, string>): string {
@@ -47,7 +48,8 @@ ${vars}
 case "$1" in
   inspect) [ -n "$FAKE_SERVER" ] || exit 1
     case "$3" in *Labels*) echo "$FAKE_LABELS" ;; *.Id*) echo cid123 ;; *) echo "$FAKE_SERVER" ;; esac ;;
-  exec) case "$2" in -i) case "$4" in sh) cat >>"$FAKE_FS/.mc-harness-runs" ;; *) cat >/dev/null; printf '%s' "$FAKE_REPLY" ;; esac ;; *)
+  exec) case "$2" in -i) case "$4" in sh) cat >>"$FAKE_FS/.mc-harness-runs" ;; *) req=$(cat); printf '%s\n' "$req" >>"$FAKE_FS/.relay-requests"
+      case "$req" in *'"bot.quitAll"'*) printf '{"ok":true,"quit":[]}' ;; *) printf '%s' "$FAKE_REPLY" ;; esac ;; esac ;; *)
     case "$3" in cat) cat "$FAKE_FS/\${4#/server/}" ;; touch) touch "$FAKE_FS/\${4#/server/}" ;; test) [ -e "$FAKE_FS/\${5#/server/}" ] ;; esac ;; esac ;;
   cp) src=\${2#*:/server/}; [ -e "$FAKE_FS/$src" ] || exit 1; cp "$FAKE_FS/$src" "$3" ;;
   logs) printf '%s\\n' "$FAKE_LOG" ;;

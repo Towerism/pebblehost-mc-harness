@@ -28,7 +28,8 @@ label() {
   [ "$status" -eq 0 ]
   [[ $output == *"image: built mc-dev:"* ]]
   [[ $output == *"override: server.properties: online-mode=false"* ]]
-  [[ $output == *"override: 2 overridden file(s) verified in the image"* ]]
+  [[ $output == *"override: 3 overridden file(s) verified in the image"* ]]
+  docker exec "$SERVER" grep -qx '  connection-throttle: -1' /server/bukkit.yml
   [[ $output == *"up: pod dev done in"* ]]
   [ "$(docker exec "$SERVER" cat /server/fixture.txt)" = 'from fixtures' ]
   docker exec "$SERVER" grep -qx 'online-mode=false' /server/server.properties
@@ -96,6 +97,37 @@ label() {
   run dev console
   [ "$status" -eq 2 ]
   [[ $output == *"console needs a server command"* ]]
+}
+
+@test "a bot joined by one CLI call chats and reads replies in later calls" {
+  run dev bot join Steve
+  [ "$status" -eq 0 ]
+  [ "$output" = 'bot: Steve joined' ]
+  # A second join right away: the connection-throttle override lets it in.
+  run dev bot join Alex
+  [ "$status" -eq 0 ]
+  run dev console list
+  [[ $output == "There are 2 of a max of 20 players online: "* && $output == *Steve* && $output == *Alex* ]]
+  run dev bot quit Alex
+  [ "$status" -eq 0 ]
+  run dev bot chat Steve hello from the bot
+  [ "$status" -eq 0 ]
+  timeout 10 bash -c 'until docker logs "$1" 2>&1 | grep "<Steve> hello from the bot" >/dev/null; do sleep 0.5; done' _ "$SERVER"
+  # A reply that arrives between two calls is kept for the next wait.
+  run dev console say hi Steve
+  [ "$status" -eq 0 ]
+  run dev bot wait Steve 'hi Steve'
+  [ "$status" -eq 0 ]
+  [[ $output == *"hi Steve"* ]]
+  run dev bot list
+  [ "$output" = Steve ]
+  run dev bot quit Steve
+  [ "$status" -eq 0 ]
+  run dev bot list
+  [ "$output" = 'no bots' ]
+  run dev bot wait Steve x
+  [ "$status" -eq 2 ]
+  [[ $output == *"no bot Steve"* ]]
 }
 
 @test "status and boot-report describe the running pod" {

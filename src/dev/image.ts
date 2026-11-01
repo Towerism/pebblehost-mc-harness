@@ -12,7 +12,7 @@ export const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
 // What the harness puts into an image besides the server tree.
 export const HARNESS_INPUTS = ['docker/server.Dockerfile', 'docker/entrypoint.sh', 'src/dev/overrides.ts'];
 // What goes into the relay image; their hash is its tag.
-export const RELAY_INPUTS = ['docker/relay.Dockerfile', 'src/relay/daemon.ts', 'src/relay/client.ts', 'src/relay/rcon.ts'];
+export const RELAY_INPUTS = ['docker/relay.Dockerfile', 'docker/relay/package.json', 'docker/relay/package-lock.json', 'src/relay/daemon.ts', 'src/relay/client.ts', 'src/relay/rcon.ts', 'src/relay/bots.ts'];
 
 export type Source = { kind: 'git'; root: string; commit: string } | { kind: 'dir'; root: string };
 // source=archive images come from a commit; source=dir images from a plain
@@ -262,10 +262,13 @@ export function buildRelay(d: Docker, project: string, root: string, harnessRoot
   if (d(['image', 'inspect', tag]).status === 0) return tag;
   const ctx = mkdtempSync(join(privateDir(join(root, '.dev')), 'relay-'));
   try {
-    mkdirSync(join(ctx, 'relay'));
-    for (const f of RELAY_INPUTS.slice(1)) cpSync(join(harnessRoot, f), join(ctx, 'relay', f.split('/').pop() as string));
+    // deps/: what npm ci installs (docker/relay/); relay/: the daemon's sources.
+    for (const f of RELAY_INPUTS) {
+      const dest = f === 'docker/relay.Dockerfile' ? 'Dockerfile' : f.startsWith('docker/relay/') ? `deps/${f.slice('docker/relay/'.length)}` : `relay/${f.slice('src/relay/'.length)}`;
+      mkdirSync(dirname(join(ctx, dest)), { recursive: true });
+      cpSync(join(harnessRoot, f), join(ctx, dest));
+    }
     writeFileSync(join(ctx, 'relay', 'package.json'), '{"type":"module"}\n');
-    cpSync(join(harnessRoot, RELAY_INPUTS[0]), join(ctx, 'Dockerfile'));
     const r = d(['build', '-f', join(ctx, 'Dockerfile'), '-t', tag, '--label', `mc-harness.project=${project}`, ctx]);
     if (r.status !== 0) fail(`docker build of the relay failed:\n${(r.stdout + r.stderr).split('\n').slice(-30).join('\n')}`);
     return tag;
