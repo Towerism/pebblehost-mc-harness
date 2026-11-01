@@ -150,7 +150,7 @@ function waitBoot(p: Pod, since: number, timeout: number | undefined): number {
 
 // Options given on the command line win over the pod's saved ones; --fixtures
 // replaces the saved sqlite fixtures (from bin/check run --fresh) too.
-function podFile(p: Pod, o: Opts, saved: boolean): PodFile {
+export function podFile(p: Pod, o: Pick<Opts, 'fixtures' | 'jar' | 'heap'>, saved: boolean): PodFile {
   const prev: PodFile = saved ? readPodFile(p) : { fixtures: [] };
   const fx = o.fixtures.length > 0 ? { fixtures: o.fixtures } : { fixtures: prev.fixtures, sqlite: prev.sqlite };
   return { ...fx, jar: o.jar ?? prev.jar, heap: o.heap ?? prev.heap };
