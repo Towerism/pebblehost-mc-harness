@@ -17,7 +17,8 @@ The `mc` command: list, pull, diff and push the server's files over SFTP.
 
 ### Working In This Directory
 - Paths go through `clean_path`: relative to the server root, no `..`. `pull`, `diff` and `push` on the root need `--all`.
-- `MC_HOME` (default: the repo root) holds `.env`, `server/`, `backups/` and `.mc/`; tests point it at a temp directory.
+- `MC_HOME` (default: the repo root) holds `.env`, `server/`, `backups/` and `.mc/`; tests point it at a temp directory. When `MC_HOME` is the top of a linked git worktree of a non-bare repo, `main_checkout` finds the main checkout (ignoring any inherited `GIT_DIR`): `.env` comes from there when the worktree has none and `MC_ENV_FILE` is unset, and `backups/` is always there. `server/` and `.mc/` stay in the worktree.
+- `ls -l` reads `rclone lsf --format stp`; the name is the last field so a `|` in it survives, and size `-1` (a directory) prints as `-`. `-l` with any other command is an error.
 - Exit codes: 0 ok, 1 `diff` found differences, 2 error (`die`). Keep that split.
 - The password must never reach argv, output or any written file.
 - Push safety relies on: the remote listing recorded *before* the pull's copy; the listing compared again before upload; the remote copy saved to `backups/<ts>/remote/` before upload; `--ignore-times` on transfers (SFTP modtimes have 1-second precision).
@@ -33,5 +34,6 @@ The `mc` command: list, pull, diff and push the server's files over SFTP.
 
 ### External
 - `rclone` (`lsf`, `copyto`, `obscure`), coreutils, `diff`, `find`, `sha1sum`
+- `git` (optional, 2.31+ for `--path-format`): only to detect a linked worktree
 
 ## Manual Notes

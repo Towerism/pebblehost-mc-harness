@@ -14,6 +14,6 @@ Opt-in, read-only smoke test against the real PebbleHost server, using the `.env
 ## For AI Agents
 
 ### Working In This Directory
-Tests here must stay read-only (`ls`, or `pull` into a temp `MC_HOME`); never `push` to the real server from a test. Run with `make test-live`, adding `MC_HOME=<dir with .env>` when running from a worktree.
+Tests here must stay read-only (`ls`, or `pull` into a temp `MC_HOME`); never `push` to the real server from a test. Run with `make test-live`; from a linked worktree, `bin/mc` uses the main checkout's `.env`.
 
 ## Manual Notes

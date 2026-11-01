@@ -198,3 +198,176 @@ ENV
   [ "$status" -eq 2 ]
   [[ $output == *"usage: mc"* ]]
 }
+
+# A fresh repo at $main (symlinks resolved, as git reports paths); never the repo running the tests.
+make_repo() {
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
+  main=$(cd "$BATS_TEST_TMPDIR" && pwd -P)/main
+  git init -q "$@" "$main"
+  git -C "$main" -c user.name=t -c user.email=t@t -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+    commit -q --allow-empty -m init
+}
+
+# A linked worktree of a fresh repo; MC_HOME points at the worktree and .env moves to the main checkout.
+make_worktree() {
+  make_repo
+  git -C "$main" worktree add -q "$BATS_TEST_TMPDIR/wt"
+  mv "$MC_HOME/.env" "$main/.env"
+  export MC_HOME=$BATS_TEST_TMPDIR/wt
+}
+
+@test "a worktree with no .env anywhere names the main checkout's .env" {
+  make_worktree
+  rm "$main/.env"
+  run "$mc" ls
+  [ "$status" -eq 2 ]
+  [[ $output == *"missing $main/.env"* ]]
+}
+
+@test "MC_ENV_FILE wins over the main checkout's .env, even when it is missing" {
+  make_worktree
+  printf 'PEBBLE_SFTP_HOST=other.example.net\nPEBBLE_SFTP_USER=u\nPEBBLE_PANEL_PASSWORD=p\n' >"$BATS_TEST_TMPDIR/other.env"
+  MC_ENV_FILE=$BATS_TEST_TMPDIR/other.env run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=other.example.net' "$STUB_ENV"
+  MC_ENV_FILE=$BATS_TEST_TMPDIR/none.env run "$mc" ls
+  [ "$status" -eq 2 ]
+  [[ $output == *"missing $BATS_TEST_TMPDIR/none.env"* ]]
+}
+
+@test "a pull from a worktree stashes local edits in the main checkout's backups/" {
+  make_worktree
+  "$mc" pull plugins/a.yml
+  echo edited >"$MC_HOME/server/plugins/a.yml"
+  run "$mc" pull plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"moved unpushed local edits to $main/backups/"* ]]
+  [ "$(cat "$main"/backups/*/local/plugins/a.yml)" = edited ]
+}
+
+@test "a subdirectory of a worktree is not treated as a worktree" {
+  make_worktree
+  mkdir "$MC_HOME/sub"
+  export MC_HOME=$MC_HOME/sub
+  run "$mc" ls
+  [ "$status" -eq 2 ]
+  [[ $output == *"missing $MC_HOME/.env"* ]]
+}
+
+@test "a worktree of a bare repo is not treated as a worktree" {
+  make_repo
+  git clone -q --bare "$main" "$BATS_TEST_TMPDIR/bare.git"
+  git -C "$BATS_TEST_TMPDIR/bare.git" worktree add -q "$BATS_TEST_TMPDIR/wt"
+  mv "$MC_HOME/.env" "$BATS_TEST_TMPDIR/wt/.env"
+  export MC_HOME=$BATS_TEST_TMPDIR/wt
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"previous remote copy in backups/"* ]]
+}
+
+@test "a main checkout keeps backups under MC_HOME" {
+  make_repo
+  mv "$MC_HOME/.env" "$main/.env"
+  export MC_HOME=$main
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"previous remote copy in backups/"* ]]
+}
+
+@test "without git, a worktree keeps backups under MC_HOME" {
+  make_worktree
+  mv "$main/.env" "$MC_HOME/.env"
+  nogit=$BATS_TEST_TMPDIR/nogit
+  mkdir "$nogit"
+  for f in /usr/bin/* /bin/*; do [ "${f##*/}" = git ] || ln -sf "$f" "$nogit/"; done
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  PATH=$BATS_TEST_DIRNAME/stub:$nogit "$mc" pull plugins/a.yml
+  PATH=$BATS_TEST_DIRNAME/stub:$nogit run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"previous remote copy in backups/"* ]]
+  [ ! -e "$main/backups" ]
+}
+
+@test "a backup directory that cannot be created stops push with exit 2 before uploading" {
+  make_worktree
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  echo blocker >"$main/backups"
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 2 ]
+  [[ $output == *"cannot create a backup in $main/backups"* ]]
+  run ! grep -q -- "--inplace" "$STUB_LOG"
+}
+
+@test "a worktree without .env uses the main checkout's .env" {
+  make_worktree
+  run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=node.example.net' "$STUB_ENV"
+}
+
+@test "a worktree's own .env and MC_ENV_FILE win over the main checkout's" {
+  make_worktree
+  printf 'PEBBLE_SFTP_HOST=wt.example.net\nPEBBLE_SFTP_USER=u\nPEBBLE_PANEL_PASSWORD=p\n' >"$MC_HOME/.env"
+  run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=wt.example.net' "$STUB_ENV"
+  printf 'PEBBLE_SFTP_HOST=other.example.net\nPEBBLE_SFTP_USER=u\nPEBBLE_PANEL_PASSWORD=p\n' >"$BATS_TEST_TMPDIR/other.env"
+  MC_ENV_FILE=$BATS_TEST_TMPDIR/other.env run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=other.example.net' "$STUB_ENV"
+}
+
+@test "a push from a worktree backs up into the main checkout; the mirror stays in the worktree" {
+  make_worktree
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  [ "$(cat "$MC_HOME/server/plugins/a.yml")" = remote ]
+  [ ! -e "$main/server" ]
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"previous remote copy in $main/backups/"* ]]
+  [ "$(cat "$main"/backups/*/remote/plugins/a.yml)" = remote ]
+  [ ! -e "$MC_HOME/backups" ]
+}
+
+@test "outside a worktree, backups stay under MC_HOME" {
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"previous remote copy in backups/"* ]]
+}
+
+@test "ls -l shows size and modtime; directories show - for size" {
+  printf '%s\n' '-1|2026-11-01 09:12:40|ExcellentEconomy/' '173814|2026-10-30 18:01:02|ExcellentEconomy-2.8.0.jar' '5|2026-10-30 18:01:02|a|b.yml' >"$STUB_LSF"
+  run "$mc" ls plugins -l
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = '           -  2026-11-01 09:12:40  ExcellentEconomy/' ]
+  [ "${lines[1]}" = '      173814  2026-10-30 18:01:02  ExcellentEconomy-2.8.0.jar' ]
+  [ "${lines[2]}" = '           5  2026-10-30 18:01:02  a|b.yml' ]
+  grep -qx "rclone lsf --format stp --separator | pebble:plugins" "$STUB_LOG"
+  run "$mc" ls --long plugins
+  [ "$status" -eq 0 ]
+}
+
+@test "plain ls prints rclone's names unchanged" {
+  printf '%s\n' 'ExcellentEconomy/' 'ExcellentEconomy-2.8.0.jar' >"$STUB_LSF"
+  run "$mc" ls plugins
+  [ "$status" -eq 0 ]
+  [ "$output" = $'ExcellentEconomy/\nExcellentEconomy-2.8.0.jar' ]
+  grep -qx "rclone lsf pebble:plugins" "$STUB_LOG"
+}
+
+@test "-l with pull, diff or push is refused" {
+  for c in pull diff push; do
+    run "$mc" "$c" plugins/a.yml -l
+    [ "$status" -eq 2 ]
+    [[ $output == *"-l works only with ls"* ]]
+  done
+  [ ! -e "$STUB_LOG" ]
+}

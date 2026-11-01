@@ -10,7 +10,7 @@ End-to-end tests for `bin/mc` with real rclone against a local SFTP server.
 | File | Description |
 |------|-------------|
 | `setup_suite.bash` | Starts one `atmoz/sftp:alpine` container for the whole run (user `mc`, a password containing `$` and a space, random localhost port, writable `upload/`), waits for sshd, and removes it in `teardown_suite` (it also runs when setup fails) |
-| `mc.bats` | Scenarios: root push with `--all`, ls, pull → edit → diff → push, backup contents, refusal after a remote change, remote deletes not resurrected, wrong password not echoed |
+| `mc.bats` | Scenarios: root push with `--all`, ls, `ls -l` sizes, pull → edit → diff → push, backup contents, refusal after a remote change, remote deletes not resurrected, wrong password not echoed |
 
 ## For AI Agents
 

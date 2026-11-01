@@ -16,7 +16,7 @@ Paths are relative to the server root (`plugins/CrateReloaded/crates/vote.yml`);
 
 | Command | Does |
 |---|---|
-| `bin/mc ls [path]` | list one remote directory level; directories end in `/` |
+| `bin/mc ls [path] [-l]` | list one remote directory level; directories end in `/`. `-l` (`--long`) adds the size in bytes (`-` for directories) and the modtime (UTC) |
 | `bin/mc pull <path>` | copy a remote file or directory into `server/<path>`, replacing the local copy, and record the remote listing |
 | `bin/mc diff <path>` | unified diff remote → `server/<path>`; exit 1 when they differ |
 | `bin/mc push <path>` | upload `server/<path>`; first copies the current remote version to `backups/<ts>/remote/<path>` |
@@ -32,10 +32,18 @@ Exit codes: 0 ok, 1 differences found (`diff` only), 2 error.
 
 `server/`, `backups/` and `.mc/` are git-ignored: server files can hold plugin database passwords and must not be committed to this public repo. Run `make hooks` once per clone; it covers every worktree. The pre-commit, pre-merge-commit and pre-push hooks run `bin/path-guard`, which refuses (exit 2) any path outside the public allowlist, any symlink, and any copy of a file under `server/`, `backups/` or `.mc/`. Never bypass it with `--no-verify`. If something leaks anyway, follow `docs/leak-response.md`.
 
+### From a git worktree
+
+Background sessions may edit files only inside their worktree. Run the worktree's own `bin/mc`; no override is needed:
+
+- `.env` comes from the main checkout when the worktree has none (`MC_ENV_FILE` still wins).
+- `backups/` is the main checkout's, so backups survive `git worktree remove`. Messages print its absolute path.
+- `server/` and `.mc/` are the worktree's own: pull fresh into the worktree, edit there, and push from there. They are deleted with the worktree.
+
 ## Taking a task
 
 1. Locate: `bin/mc ls` from the root down (`plugins/`, the plugin's folder). Common places: `server.properties`, `bukkit.yml`, `spigot.yml`, `config/paper-*.yml`, `plugins/<Plugin>/config.yml` and the plugin's data folders, `logs/latest.log` for errors.
-2. Pull only what the task needs. Don't pull `world*/` or `plugins/*.jar` unless asked: they are large.
+2. Pull only what the task needs. Don't pull `world*/` or `plugins/*.jar` unless asked: they are large. Before pulling a file that may be large, check its size with `bin/mc ls -l <dir>`.
 3. Diagnose from the files and `logs/latest.log`. For plugin config questions, check the plugin's own documentation for the version in use (the version is in the jar name or the log's startup lines).
 4. Edit under `server/`, then show the user `bin/mc diff <path>` and wait for their OK.
 5. `bin/mc push <path>`, and tell the user what to run to apply it: the plugin's reload command, or a restart from the panel.
