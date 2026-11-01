@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { consoleOps, handle, rconSession, serve } from '../../src/relay/daemon.ts';
 import { AUTH, Decoder, encode, EXEC, MARKER, MAX_BODY, Rcon } from '../../src/relay/rcon.ts';
 import { HARNESS_ROOT } from '../../src/dev/image.ts';
+import { clientTimeout } from '../../src/relay/client.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'relay-test-'));
 const BIG = `${'a'.repeat(4095)}é${'b'.repeat(100)}`;
@@ -221,6 +222,14 @@ test('the daemon process keeps its RCON connection across client calls and exits
   f.server.close();
 });
 
+test('the client waits a minute past the request timeoutMs, so a long bot wait is never cut short', () => {
+  assert.equal(clientTimeout('{"op":"console","command":"list"}'), 60_000);
+  assert.equal(clientTimeout('{"op":"bot.waitMessage","name":"Steve","regex":"x","timeoutMs":90000}'), 150_000);
+  assert.equal(clientTimeout('{"op":"bot.join","name":"Steve","timeoutMs":9999999}'), 660_000);
+  assert.equal(clientTimeout('not json'), 60_000);
+  assert.equal(clientTimeout('{"op":"x","timeoutMs":-5}'), 60_000);
+});
+
 test('the daemon refuses to start without RCON_HOST or RCON_PASSWORD', () => {
   const r = spawnSync('node', [DAEMON], { env: { PATH: process.env.PATH }, encoding: 'utf8' });
   assert.equal(r.status, 2);
@@ -269,6 +278,12 @@ test('bin/dev bot sends one bot request per call through the relay and marks the
   assert.deepEqual([r.status, r.stdout, JSON.parse(r.stdin)], [0, 'bot: Steve sent\n', { op: 'bot.chat', name: 'Steve', message: '/me waves' }]);
   r = consoleCli({ FAKE_REPLY: '{"ok":true,"line":"[Server] hi"}' }, 'bot', '--timeout', '3', 'wait', 'Steve', 'hi$');
   assert.deepEqual([r.status, r.stdout, JSON.parse(r.stdin)], [0, '[Server] hi\n', { op: 'bot.waitMessage', name: 'Steve', regex: 'hi$', timeoutMs: 3000 }]);
+  // --timeout after the bot's words is an option, not part of the regex.
+  r = consoleCli({ FAKE_REPLY: '{"ok":true,"line":"done"}' }, 'bot', 'wait', 'Steve', 'all done', '--timeout', '45');
+  assert.deepEqual([r.status, JSON.parse(r.stdin)], [0, { op: 'bot.waitMessage', name: 'Steve', regex: 'all done', timeoutMs: 45000 }]);
+  r = consoleCli({}, 'bot', 'wait', 'Steve', 'x', '--timeout', 'soon');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bad --timeout/);
   r = consoleCli({ FAKE_REPLY: '{"ok":true,"bots":["Alex","Steve"]}' }, 'bot', '--pod', 'p2', 'list');
   assert.deepEqual([r.status, r.stdout], [0, 'Alex\nSteve\n']);
   assert.doesNotMatch(r.argv, /touch/, 'list does not mark the volume explored');

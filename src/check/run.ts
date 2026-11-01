@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { boot } from '../dev/cli.ts';
 import { fail, type Docker } from '../dev/docker.ts';
 import { dirtyHarness, dirtyServer, git, labels, source, toolHash } from '../dev/image.ts';
-import { isExplored, logRun, names, podOf, readPodFile, runPosition, state, type Pod } from '../dev/pod.ts';
+import { isExplored, logRun, names, podOf, readPodFile, relayRequest, runPosition, state, type Pod } from '../dev/pod.ts';
 import { fixtureDirs, readProfile, type Profile } from './profile.ts';
 import { appendRecord, type RunRecord } from './record.ts';
 
@@ -124,7 +124,17 @@ export function runCheck(o: RunOpts, d: Docker): Run {
     if (dirty.length > 0) fail(`server/ has uncommitted changes; a bare-text run reads HEAD, so commit them first:\n${dirty.join('\n')}`);
     id = { source: 'head', commit: src.commit, treeHash: git(o.root, ['rev-parse', `${src.commit}:server`]).stdout.trim(), harnessHash: '', imageHash: '', fixturesHash: '', generation: '', fresh: false, explored: false, containerId: '', runIndex: 0, concurrent: false };
   }
-  const { pass, output } = runTests(o.root, o.id, files, checkEnv(o.root, o.id, o.pod, id.commit, profile), o.timeoutS);
+  // Bots a previous run left joined would skew this one (a name already
+  // taken, an extra player): every bot leaves before and after the tests.
+  // The relay call is not a check run: no run-log line, no explored mark.
+  if (kind === 'e2e') relayRequest(p, d, { op: 'bot.quitAll' });
+  let run: { pass: boolean; output: string };
+  try {
+    run = runTests(o.root, o.id, files, checkEnv(o.root, o.id, o.pod, id.commit, profile), o.timeoutS);
+  } finally {
+    if (kind === 'e2e') relayRequest(p, d, { op: 'bot.quitAll' });
+  }
+  const { pass, output } = run;
   if (logged) {
     const pos = runPosition(logged.pod, d, logged.nonce);
     id.runIndex = pos.index;

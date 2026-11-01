@@ -208,7 +208,16 @@ function main(argv: string[]) {
       break;
     }
     case 'bot': {
-      const [sub, name, ...rest] = o.words;
+      // --timeout S may follow the bot's words too (bot wait NAME RE --timeout 45).
+      const words = [...o.words];
+      const at = words.indexOf('--timeout');
+      let timeout = o.timeout;
+      if (at >= 0) {
+        timeout = Number(words[at + 1]);
+        if (!(timeout > 0)) fail(`bad --timeout\n${USAGE}`);
+        words.splice(at, 2);
+      }
+      const [sub, name, ...rest] = words;
       const st = state(d, requireServer(p));
       if (st !== 'running') fail(`server of pod ${p.pod} is ${st}; run bin/dev restart`);
       if (sub === 'list' && name === undefined) {
@@ -226,7 +235,7 @@ function main(argv: string[]) {
       }
       if (sub === 'wait') {
         if (rest.length === 0) fail('bot wait needs a regex');
-        say(String(relayRequest(p, d, { op: 'bot.waitMessage', name, regex: rest.join(' '), timeoutMs: (o.timeout ?? 10) * 1000 }).line));
+        say(String(relayRequest(p, d, { op: 'bot.waitMessage', name, regex: rest.join(' '), timeoutMs: (timeout ?? 10) * 1000 }).line));
         break;
       }
       say(`bot: ${name} ${sub === 'join' ? 'joined' : sub === 'quit' ? 'quit' : 'sent'}`);
