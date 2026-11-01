@@ -66,7 +66,9 @@ test('refusal cases of the gate table', () => {
   // A restart of the red's image after the fix commit still carries the red's commit.
   refused([red, rec({ pass: true, generation: 'g1' })], /^G3/);
   refused([red, { ...green, imageHash: sha('forged') }], /^G5: the green record's tree or image hash/);
-  refused([{ ...red, source: 'dir' }, green], /^G5: the red image was built from dir/);
+  // Only source=archive images count: a plain-copy (dir) build has no commit to vouch for.
+  refused([{ ...red, source: 'dir' }, green], /^G5: the red image was built from dir, not a commit/);
+  refused([red, { ...green, source: 'dir', treeHash: `dir:${'0'.repeat(64)}` }], /^G5: the green image was built from dir, not a commit/);
   refused([red, { ...green, fixturesHash: 'f2' }], /^G6: the fixtures changed/);
   refused([{ ...red, explored: true }, green], /^G9: the red's volume g1 was explored/);
   refused([{ ...red, fresh: false }, green], /^G9: the red ran on volume g1, which bin\/check run --fresh did not make/);
