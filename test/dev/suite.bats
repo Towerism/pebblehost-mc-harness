@@ -1,7 +1,9 @@
 # Dev tier: bin/check suite over the suite's vanilla project. Runs after
-# dev.bats (no pod left) and before verify.bats. Two fixture profiles of
-# three e2e checks each (one fails on purpose, one restarts the server),
-# plus a bare-text check, run twice.
+# dev.bats (no pod left) and before verify.bats. Three fixture profiles: one
+# without fixtures (one check calls dev.restart() without declaring it and
+# fails), one with fixtures (restored by copy; one check restarts the
+# server), one with data (reset by a restart), plus a bare-text check; run
+# twice, then stopped by SIGINT and SIGTERM mid-boot.
 
 bats_require_minimum_version 1.5.0
 
@@ -43,9 +45,26 @@ test('list', async () => assert.match(await dev.console('list'), /players online
 EOF
   e2e s-fail '{"kind":"e2e"}' <<'EOF'
 import { test } from 'node:test';
+import { dev } from '#harness/dev';
+test('restarts without declaring it', async () => dev.restart());
+EOF
+  # Vanilla keeps IP bans in memory and in banned-ips.json: declared data, so
+  # the suite resets it by a restart with the fixtures applied again.
+  for id in s-ban-a s-ban-b; do mkdir -p "$MC_HOME/checks/$id/fx" && echo '[]' >"$MC_HOME/checks/$id/fx/banned-ips.json"; done
+  e2e s-ban-a '{"kind":"e2e","fixtures":["fx"],"data":["banned-ips.json"]}' <<'EOF'
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dev } from '#harness/dev';
-test('fails on purpose', async () => assert.equal(await dev.console('seed'), 'no such seed'));
+test('bans an IP', async () => {
+  assert.match(await dev.console('ban-ip 10.1.2.3'), /10\.1\.2\.3/);
+  assert.doesNotMatch(await dev.console('banlist ips'), /no bans/);
+});
+EOF
+  e2e s-ban-b '{"kind":"e2e","fixtures":["fx"],"data":["banned-ips.json"]}' <<'EOF'
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { dev } from '#harness/dev';
+test('starts with no bans', async () => assert.match(await dev.console('banlist ips'), /no bans/));
 EOF
   for id in s-fx1 s-fx2; do
     e2e "$id" '{"kind":"e2e","fixtures":["fx"]}' <<'EOF'
@@ -84,12 +103,15 @@ EOF
   # Unit tier before any pod boots.
   [[ $output == "PASS s-bare"* ]]
   [[ $output == *"FAIL s-fail"* ]]
+  [[ $output == *'dev.restart() needs "restart": true or "exclusive": true'* ]]
+  # The data profile's second check sees no ban: the restart reset worked.
+  [[ $output == *"PASS s-ban-a"* && $output == *"PASS s-ban-b"* ]]
   for id in s-diff s-list s-fx1 s-fx2 s-restart; do [[ $output == *"PASS $id"* ]]; done
-  [[ $output == *"suite: 7 check(s), 1 failed (s-fail); 2 pod(s)"* ]]
+  [[ $output == *"suite: 9 check(s), 1 failed or refused (s-fail); 3 pod(s)"* ]]
   [[ $output == *"OVER BUDGET by"* ]]
   # The restart check runs last on its profile's pod.
-  [ "$(timing 't.profiles.map((p) => p.tests.map((x) => x.check).join(",")).join(" ")')" = 's-diff,s-fail,s-list s-fx1,s-fx2,s-restart' ]
-  [ "$(timing 't.profiles.map((p) => p.reset).join(",")')" = 'none,restore' ]
+  [ "$(timing 't.profiles.map((p) => p.tests.map((x) => x.check).join(",")).join(" ")')" = 's-ban-a,s-ban-b s-diff,s-fail,s-list s-fx1,s-fx2,s-restart' ]
+  [ "$(timing 't.profiles.map((p) => p.reset).join(",")')" = 'reset,none,restore' ]
   [ "$(timing 't.profiles.every((p) => p.boot > 0 && p.teardown > 0)')" = true ]
   [ "$(timing 't.image.cacheHit')" = false ]
   echo "$output" | grep -E '^(PASS|FAIL) ' | cut -d' ' -f1,2 | sort >"$BATS_SUITE_TMPDIR/first"
@@ -100,9 +122,32 @@ EOF
   run suite
   [ "$status" -eq 1 ]
   [ "$(timing 't.image.cacheHit')" = true ]
-  [ "$(timing 't.profiles.length')" = 2 ]
+  [ "$(timing 't.profiles.length')" = 3 ]
   diff "$BATS_SUITE_TMPDIR/first" <(echo "$output" | grep -E '^(PASS|FAIL) ' | cut -d' ' -f1,2 | sort)
   nothing_labelled
+}
+
+# Send sig to the bin/check process alone (its pid is node's: the shim
+# execs) once the first suite pod is up, and expect exit code and no pod.
+stop_mid_boot() {
+  "$BATS_TEST_DIRNAME/../../bin/check" suite </dev/null >"$BATS_TEST_TMPDIR/out" 2>&1 &
+  pid=$!
+  timeout 180 bash -c 'until docker ps -q --filter "name=mc-$1-suite0-server" | grep . >/dev/null; do sleep 0.5; done' _ "$PROJECT"
+  kill "-$1" "$pid"
+  status=0
+  wait "$pid" || status=$?
+  cat "$BATS_TEST_TMPDIR/out"
+  [ "$status" -eq "$2" ]
+  grep -E "suite: SIG$1: removed [1-9][0-9]* suite resource\(s\)" "$BATS_TEST_TMPDIR/out"
+  nothing_labelled
+}
+
+@test "SIGINT to bin/check while a suite pod boots: exit 130, every suite pod removed" {
+  stop_mid_boot INT 130
+}
+
+@test "SIGTERM to bin/check while a suite pod boots: exit 143, every suite pod removed" {
+  stop_mid_boot TERM 143
   "$DEV" down --all </dev/null
   [ -z "$(docker image ls -q --filter "label=mc-harness.project=$PROJECT")" ]
 }
