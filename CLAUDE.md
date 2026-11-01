@@ -40,6 +40,10 @@ Background sessions may edit files only inside their worktree. Run the worktree'
 - `backups/` is the main checkout's, so backups survive `git worktree remove`. Messages print its absolute path.
 - `server/` and `.mc/` are the worktree's own: pull fresh into the worktree, edit there, and push from there. They are deleted with the worktree.
 
+## `bin/dev`: local dev server
+
+`bin/dev up` builds `mc-dev:<hash>` from the committed `server/` and boots it in Docker with no network access. `bin/dev restart` keeps server state, `bin/dev rebuild` boots a new commit on a fresh volume, `bin/dev reset` re-applies `--fixtures` dirs, `bin/dev boot-report` summarises the boot, `bin/dev join` lets a Minecraft client connect on `127.0.0.1:25565`, and `bin/dev down` removes the pod. `up` and `rebuild` refuse uncommitted `server/` changes (exit 2); commit first.
+
 ## Taking a task
 
 1. Locate: `bin/mc ls` from the root down (`plugins/`, the plugin's folder). Common places: `server.properties`, `bukkit.yml`, `spigot.yml`, `config/paper-*.yml`, `plugins/<Plugin>/config.yml` and the plugin's data folders, `logs/latest.log` for errors.
@@ -50,4 +54,4 @@ Background sessions may edit files only inside their worktree. Run the worktree'
 
 ## Tests
 
-Run `npm ci` once first. `make test-unit` (stubbed rclone, path-guard hooks in temp repos and `node --test test/ts/`, about a second), `make test-integration` (one shared `atmoz/sftp` Docker container for the whole run), `make lint` (shellcheck and `tsc --noEmit`), and `make test-live` for a read-only `ls` against the real server.
+Run `npm ci` once first. `make test-unit` (stubbed rclone, path-guard hooks in temp repos and `node --test test/ts/`, about a second), `make test-integration` (one shared `atmoz/sftp` Docker container for the whole run), `make test-dev` (`bin/dev` against vanilla Purpur in Docker, about a minute; downloads Purpur once), `make lint` (shellcheck and `tsc --noEmit`), and `make test-live` for a read-only `ls` against the real server.
