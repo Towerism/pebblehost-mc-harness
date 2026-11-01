@@ -160,6 +160,17 @@ export function isExplored(p: Pod, d: Docker): boolean {
   return d(['exec', names(p).server, 'test', '-e', EXPLORED]).status === 0;
 }
 
+// Restart the server container on its volume and wait for "Done"; with
+// reset, drop the seeded marker first so /fixtures is applied again.
+// Returns the boot's "Done" seconds.
+export function restartServer(p: Pod, d: Docker, reset: boolean): number {
+  const server = names(p).server;
+  if (reset) must(d, ['exec', server, 'rm', '-f', MARKER]);
+  const since = Date.now() / 1000;
+  must(d, ['restart', '-t', '60', server]);
+  return waitDone(p, d, since, bootTimeout(readBoots(p)));
+}
+
 // Every bin/check run on a volume appends a line here; the gate counts only
 // a red or green that was the first run on its volume, so no other check
 // can have changed the server before it.
