@@ -41,12 +41,15 @@ export const OVERRIDES: readonly Override[] = [
   { file: 'plugins/InteractionVisualizer/config.yml', key: 'Options.Updater', value: 'false', why: UPDATE },
 ];
 
+// A CRLF line keeps its \r: line endings never change.
+const cr = (line: string) => (line.endsWith('\r') ? '\r' : '');
+
 // Set key=value in a .properties text, keeping every other line as is.
 export function setProperty(text: string, key: string, value: string): string | null {
   const lines = text.split('\n');
   const i = lines.findIndex((l) => l.slice(0, l.indexOf('=')).trim() === key && !l.trimStart().startsWith('#'));
   if (i < 0) return null;
-  lines[i] = `${key}=${value}`;
+  lines[i] = `${key}=${value}${cr(lines[i])}`;
   return lines.join('\n');
 }
 
@@ -74,7 +77,7 @@ export function setYaml(text: string, path: string, value: string): string | nul
     }
     if (at < 0) return null;
     if (s === segs.length - 1) {
-      lines[at] = `${lines[at].slice(0, lines[at].indexOf(':') + 1)} ${value}`;
+      lines[at] = `${lines[at].slice(0, lines[at].indexOf(':') + 1)} ${value}${cr(lines[at])}`;
       return lines.join('\n');
     }
     start = at + 1;

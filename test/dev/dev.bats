@@ -26,6 +26,7 @@ label() {
   [ "$status" -eq 0 ]
   [[ $output == *"image: built mc-dev:"* ]]
   [[ $output == *"override: server.properties: online-mode=false"* ]]
+  [[ $output == *"override: 2 overridden file(s) verified in the image"* ]]
   [[ $output == *"up: pod dev done in"* ]]
   [ "$(docker exec "$SERVER" cat /server/fixture.txt)" = 'from fixtures' ]
   docker exec "$SERVER" grep -qx 'online-mode=false' /server/server.properties
