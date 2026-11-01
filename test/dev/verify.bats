@@ -28,6 +28,9 @@ label() {
 }
 
 @test "setup: a committed difficulty check importing #harness/dev, and an easy server" {
+  # dev.bats left pod.json with its --fixtures; start without, so every boot
+  # here has the same (empty) fixtures even after .dev/ is deleted below.
+  rm -rf "$MC_HOME/.dev"
   # No import map: bin/check run's loader resolves #harness/*. .verify/ is tracked.
   echo '{"type":"module"}' >"$MC_HOME/package.json"
   echo '.dev/' >"$MC_HOME/.gitignore"
