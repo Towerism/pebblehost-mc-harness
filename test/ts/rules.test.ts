@@ -65,9 +65,17 @@ test('rclone excludes are relative to the transferred path; anchored rules outsi
   assert.equal(rcloneExcludes(rules, ['data'], 'plugins'), '*.db\n*.db/**\n');
 });
 
-test('rclone excludes escape the glob characters rules take literally', () => {
+test('rclone excludes escape the glob characters rules take literally, backslash included', () => {
   assert.equal(rcloneExcludes(parseRules('skip plugins/X/[old]{1}/\n'), ['skip'], 'plugins'), '/X/\\[old\\]\\{1\\}/**\n');
   assert.equal(rcloneExcludes(parseRules('data *[x].db\n'), ['data']), '*\\[x\\].db\n*\\[x\\].db/**\n');
+  assert.equal(rcloneExcludes(parseRules('skip a\\b.yml\n'), ['skip']), 'a\\\\b.yml\na\\\\b.yml/**\n');
+});
+
+test('rclone excludes let **/ match zero directories, as the rules do', () => {
+  const rules = parseRules('data plugins/**/x.db\nskip **/cache/\ndata plugins/a/**/b/**/c.yml\n');
+  assert.equal(rcloneExcludes(rules, ['skip', 'data']), '/plugins/{**/,}x.db\n/plugins/{**/,}x.db/**\n/{**/,}cache/**\n/plugins/a/{**/,}b/{**/,}c.yml\n/plugins/a/{**/,}b/{**/,}c.yml/**\n');
+  assert.equal(rcloneExcludes(rules, ['skip'], 'plugins'), '/{**/,}cache/**\n');
+  assert.equal(rcloneExcludes(rules, ['data'], 'plugins'), '/{**/,}x.db\n/{**/,}x.db/**\n/a/{**/,}b/{**/,}c.yml\n/a/{**/,}b/{**/,}c.yml/**\n');
 });
 
 test('the .gitignore section keeps skip and data paths under server/ out; rewriting it is idempotent', () => {

@@ -58,9 +58,9 @@ In a private server repo (.harness-private in MC_HOME or in the superproject
 of this harness), push refuses unless MC_RUNBOOK=1: bin/check runbook push
 sets it.
 MC_EXCLUDE_FILE names an rclone exclude file (one pattern per line, matched
-relative to the path given): matching paths are left out of every listing
-and transfer of a directory (rclone takes no filters on a single file;
-bin/dev sync writes one per directory from sync-rules).
+relative to the path given, ignoring case): matching paths are left out of
+every listing and transfer of a directory (rclone takes no filters on a
+single file; bin/dev sync writes one per directory from sync-rules).
 MC_FILTER_FILE names an rclone filter file (+/- rules) for ls only:
 bin/dev sync lists its tracked roots in one call with it.
 Exit codes: 0 ok, 1 diff found differences, 2 error.
@@ -141,17 +141,18 @@ clean_path() {
 
 remote() { printf 'pebble:%s' "$1"; }
 
-# Paths every listing and transfer leaves out (MC_EXCLUDE_FILE).
+# Paths every listing and transfer leaves out (MC_EXCLUDE_FILE), in any case
+# as sync-rules match.
 filter=()
 if [[ -n ${MC_EXCLUDE_FILE:-} ]]; then
   [[ -f $MC_EXCLUDE_FILE ]] || die "MC_EXCLUDE_FILE $MC_EXCLUDE_FILE not found"
-  filter=(--exclude-from "$MC_EXCLUDE_FILE")
+  filter=(--ignore-case --exclude-from "$MC_EXCLUDE_FILE")
 fi
 # Rules for ls only (MC_FILTER_FILE).
 lsfilter=()
 if [[ -n ${MC_FILTER_FILE:-} ]]; then
   [[ -f $MC_FILTER_FILE ]] || die "MC_FILTER_FILE $MC_FILTER_FILE not found"
-  lsfilter=(--filter-from "$MC_FILTER_FILE")
+  lsfilter=(--ignore-case --filter-from "$MC_FILTER_FILE")
 fi
 
 state_file() { printf '%s/%s/%s' "$state" "$1" "$(printf '%s' "$2" | sha1sum | cut -d' ' -f1)"; }

@@ -72,7 +72,9 @@ export function matchRule(rules: Rule[], rel: string, classes: RuleClass[] = ['s
 // An rclone exclude file (bin/mc MC_EXCLUDE_FILE) for the given classes, for
 // a transfer of `base` (rclone matches relative to the path transferred):
 // anchored rules are made relative to base, and dropped when outside it.
-// {} and [] are rclone glob syntax but literal in rules: escaped.
+// \, {} and [] are rclone glob syntax but literal in rules: escaped. rclone's
+// **/ needs at least one directory, so it becomes {**/,} to match zero too.
+// bin/mc passes --ignore-case with the file, as rules ignore case.
 export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): string {
   const out: string[] = [];
   const b = base.replace(/^\/+|\/+$/g, '');
@@ -80,11 +82,11 @@ export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): 
     const p = r.pattern.replace(/\/+$/, '').replace(/^\/+/, '');
     let pat: string;
     if (!r.pattern.replace(/\/+$/, '').includes('/')) pat = p;
-    else if (b === '') pat = `/${p}`;
+    else if (b === '' || p.startsWith('**/')) pat = `/${p}`;
     else if (p.startsWith(`${b}/`)) pat = `/${p.slice(b.length + 1)}`;
     else if (ruleRegex(r.pattern, true).test(b)) pat = '';
     else continue;
-    pat = pat.replace(/[{}[\]]/g, '\\$&');
+    pat = pat.replace(/[\\{}[\]]/g, '\\$&').replace(/\/\*\*\//g, '/{**/,}');
     // A directory-only rule leaves a file of that name alone.
     out.push(...(pat === '' ? ['/**'] : r.pattern.endsWith('/') ? [`${pat}/**`] : [pat, `${pat}/**`]));
   }

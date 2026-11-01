@@ -374,7 +374,7 @@ make_worktree() {
   [ ! -e "$STUB_LOG" ]
 }
 
-@test "MC_EXCLUDE_FILE reaches every listing and transfer as --exclude-from" {
+@test "MC_EXCLUDE_FILE reaches every listing and transfer as --exclude-from, ignoring case like the rules" {
   printf 'logs/**\n*.db\n' >"$BATS_TEST_TMPDIR/excl"
   export MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/excl
   run "$mc" ls plugins
@@ -382,8 +382,8 @@ make_worktree() {
   run "$mc" pull plugins
   [ "$status" -eq 0 ]
   run "$mc" diff plugins
-  [ "$(grep -c "^rclone lsf .*--exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -ge 2 ]
-  [ "$(grep -c "^rclone copyto .*--exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -eq 2 ]
+  [ "$(grep -c "^rclone lsf .*--ignore-case --exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -ge 2 ]
+  [ "$(grep -c "^rclone copyto .*--ignore-case --exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -eq 2 ]
   export MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/missing
   run "$mc" ls plugins
   [ "$status" -eq 2 ]
@@ -393,7 +393,7 @@ make_worktree() {
 @test "without MC_EXCLUDE_FILE no filter is passed" {
   run "$mc" pull plugins
   [ "$status" -eq 0 ]
-  run ! grep -q -- '--exclude-from' "$STUB_LOG"
+  run ! grep -q -- '--exclude-from\|--ignore-case' "$STUB_LOG"
 }
 
 @test "ls -R lists every file below; -R works only with ls" {
@@ -405,11 +405,11 @@ make_worktree() {
   [[ $output == *"-l and -R work only with ls"* ]]
 }
 
-@test "MC_FILTER_FILE reaches ls listings as --filter-from, and nothing else" {
+@test "MC_FILTER_FILE reaches ls listings as --filter-from, ignoring case, and nothing else" {
   printf -- '+ /plugins/**\n- **\n' >"$BATS_TEST_TMPDIR/filter"
   MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" ls -R -l
   [ "$status" -eq 0 ]
-  grep -q "^rclone lsf -R --files-only --format stp --separator | --filter-from $BATS_TEST_TMPDIR/filter pebble:$" "$STUB_LOG"
+  grep -q "^rclone lsf -R --files-only --format stp --separator | --ignore-case --filter-from $BATS_TEST_TMPDIR/filter pebble:$" "$STUB_LOG"
   # Listings only: pull's snapshot and copy, diff and push take no filter.
   MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" pull plugins
   [ "$status" -eq 0 ]
