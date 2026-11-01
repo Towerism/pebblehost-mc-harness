@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail, must } from './docker.ts';
-import { build, buildRelay, chooseJar, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
+import { build, buildRelay, chooseJar, dirtyHarness, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
 import { bootTimeout, createJoin, createPod, formatBootReport, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
 
 const USAGE = `usage: dev <command> [--pod ID] [options]
@@ -26,8 +26,9 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
   console <command...>    run a server command over RCON through the pod's
                           relay and print its reply
 
-console and join mark the pod's volume explored: a red run on it no longer
-counts for the gate (bin/check run --fresh makes a new one).
+console and join mark the pod's volume explored: no run on it counts for the
+gate (bin/check run --fresh makes a new one). up and rebuild refuse
+uncommitted harness image or relay changes too.
 
 --pod defaults to dev. --jar picks the server jar when server/ has several
 at its root; --heap sets -Xms/-Xmx (both are kept for rebuild). --timeout S
@@ -77,11 +78,6 @@ function refuseDirty(root: string) {
   return src;
 }
 
-// The server container's volume generation, as labelled at create.
-function generation(p: Pod): string {
-  return labels(d, names(p).server)['mc-harness.generation'] ?? '';
-}
-
 function requireServer(p: Pod): string {
   const n = names(p);
   if (state(d, n.server) === null) fail(`pod ${p.pod} is not up; run bin/dev up`);
@@ -95,6 +91,8 @@ function requireServer(p: Pod): string {
 export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean, fresh = false) {
   const src = refuseDirty(p.root);
   const jar = chooseJar(src, pf.jar);
+  const harness = dirtyHarness();
+  if (harness.length > 0) fail(`the harness has uncommitted image or relay changes; commit them first:\n${harness.join('\n')}`);
   const t0 = Date.now();
   const built = build(src, d, p.project);
   const relayTag = buildRelay(d, p.project, p.root);
@@ -109,7 +107,7 @@ export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: 
   chmodSync(join(n.dir, 'pod.json'), 0o600);
   const since = Date.now() / 1000;
   const javaOpts = process.env.MC_JAVA_OPTS || (pf.heap ? `-Xms${pf.heap} -Xmx${pf.heap}` : undefined);
-  const spec = { tag: built.tag, relayTag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), generation: randomUUID(), fresh, javaOpts, memory: process.env.MC_DEV_MEMORY };
+  const spec = { tag: built.tag, relayTag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), generation: randomUUID(), fresh, commit: built.id.commit, source: built.id.source, javaOpts, memory: process.env.MC_DEV_MEMORY };
   createPod(p, spec, d);
   const secs = waitBoot(p, since, timeout);
   const pruned = pruneImages(d, p.project, [built.tag, relayTag]);
@@ -187,7 +185,7 @@ function main(argv: string[]) {
       }
       requireServer(p);
       if (state(d, n.join) !== null) fail(`join proxy already running; bin/dev join --stop first`);
-      markExplored(p, generation(p));
+      markExplored(p, d);
       createJoin(p, o.port, SOCAT_IMAGE, d);
       say(`join: connect to 127.0.0.1:${o.port}`);
       break;
@@ -197,7 +195,7 @@ function main(argv: string[]) {
       if (command.trim() === '') fail(`console needs a server command\n${USAGE}`);
       const st = state(d, requireServer(p));
       if (st !== 'running') fail(`server of pod ${p.pod} is ${st}; run bin/dev restart`);
-      markExplored(p, generation(p));
+      markExplored(p, d);
       const { reply } = relayRequest(p, d, { op: 'console', command });
       if (typeof reply !== 'string') fail('relay reply without output');
       process.stdout.write(reply === '' || reply.endsWith('\n') ? reply : `${reply}\n`);

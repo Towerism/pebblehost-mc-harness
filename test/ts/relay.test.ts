@@ -237,13 +237,13 @@ echo "$*" >>"${dir}/argv"
 case "$1" in
   inspect) case "$4" in *-server) st=$FAKE_SERVER ;; *) st=$FAKE_RELAY ;; esac; [ -n "$st" ] || exit 1
     case "$3" in *Labels*) echo '{"mc-harness.generation":"g1"}' ;; *) echo "$st" ;; esac ;;
-  exec) cat >"${dir}/stdin"; printf '%s' "$FAKE_REPLY" ;;
+  exec) [ "$2" = -i ] || exit 0; cat >"${dir}/stdin"; printf '%s' "$FAKE_REPLY" ;;
 esac
 `);
   chmodSync(fake, 0o755);
   const r = spawnSync(join(HARNESS_ROOT, 'bin/dev'), args, { env: { ...process.env, MC_HOME: dir, MC_DOCKER: fake, FAKE_SERVER: 'running', FAKE_RELAY: 'running', ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
   const read = (f: string) => (existsSync(join(dir, f)) ? readFileSync(join(dir, f), 'utf8') : '');
-  return { ...r, argv: read('argv'), stdin: read('stdin'), explored: read('.dev/pods/p2/explored') };
+  return { ...r, argv: read('argv'), stdin: read('stdin') };
 }
 
 test('bin/dev console sends the words as one console request through docker exec -i, prints the exact reply and marks the volume explored', () => {
@@ -251,10 +251,10 @@ test('bin/dev console sends the words as one console request through docker exec
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'There are 0 of a max of 20 players online: \n');
   assert.deepEqual(JSON.parse(r.stdin), { op: 'console', command: 'say --pod hi' });
-  const exec = r.argv.split('\n').find((l) => l.startsWith('exec '));
+  const exec = r.argv.split('\n').find((l) => l.startsWith('exec -i '));
   assert.match(exec ?? '', /^exec -i mc-[0-9a-f]{8}-p2-relay node \/relay\/client\.ts$/);
-  // A human touched the volume: its reds no longer count for the gate.
-  assert.equal(r.explored, 'g1\n');
+  // A human touched the volume: its runs no longer count for the gate.
+  assert.match(r.argv, /^exec mc-[0-9a-f]{8}-p2-server touch \/server\/\.mc-harness-explored$/m);
   const dashed = consoleCli({ FAKE_REPLY: '{"ok":true,"reply":""}' }, 'console', '--', '--weird');
   assert.deepEqual([dashed.status, dashed.stdout, JSON.parse(dashed.stdin).command], [0, '', '--weird']);
 });

@@ -7,7 +7,6 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { markExplored, podOf } from '../../src/dev/pod.ts';
 import { issueOf, readRecords, type RunRecord } from '../../src/check/record.ts';
 import { readValue, yamlScalar } from '../../src/check/unit.ts';
 import { check, commit, E2E, git, project, write } from './project.ts';
@@ -52,7 +51,7 @@ test('difficulty', async () => {
   assert.match(red.output, /The difficulty is Easy/);
   assert.ok(!Number.isNaN(Date.parse(green.time)));
   // A human touched the volume: later records say so.
-  markExplored(podOf(root, 'dev'), 'gen-1');
+  write(root, { 'fakefs/.mc-harness-explored': '' });
   r = check(root, { ...base, FAKE_REPLY: '{"ok":true,"reply":"The difficulty is Easy"}' }, 'run', '3-motd');
   assert.match(r.stdout, /explored: does not count as a red/);
   assert.equal(readRecords(root, 3)[2].explored, true);

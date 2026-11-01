@@ -22,9 +22,9 @@ label() {
 }
 
 @test "setup: a committed difficulty check importing #harness/dev, and an easy server" {
-  ln -s "$(realpath "$BATS_TEST_DIRNAME/../..")" "$MC_HOME/harness"
-  printf '%s\n' '{"type":"module","imports":{"#harness/*":"./harness/src/check/*.ts"}}' >"$MC_HOME/package.json"
-  printf '.verify/\n.dev/\n' >"$MC_HOME/.gitignore"
+  # No import map: bin/check run's loader resolves #harness/*. .verify/ is tracked.
+  echo '{"type":"module"}' >"$MC_HOME/package.json"
+  echo '.dev/' >"$MC_HOME/.gitignore"
   mkdir -p "$MC_HOME/checks/7-difficulty"
   echo '{"kind":"e2e"}' >"$MC_HOME/checks/7-difficulty/profile.json"
   cat >"$MC_HOME/checks/7-difficulty/difficulty.test.ts" <<'EOF'
@@ -65,9 +65,11 @@ EOF
   [ "$(label fresh)" = true ]
 }
 
-@test "bin/dev console marks the volume explored; later records say so" {
+@test "bin/dev console marks the volume explored, in the volume: later records say so even without .dev/" {
   run dev console list
   [ "$status" -eq 0 ]
+  docker exec "$SERVER" test -e /server/.mc-harness-explored
+  rm -rf "$MC_HOME/.dev"
   run check run 7-difficulty
   [ "$status" -eq 1 ]
   [[ $output == *"explored: does not count as a red"* ]]

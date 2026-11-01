@@ -3,7 +3,7 @@
 // container (src/relay/) on that network only, which holds the RCON connection. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
 import { createHash } from 'node:crypto';
-import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
 import { dirHash, privateDir, walk } from './image.ts';
@@ -91,8 +91,10 @@ export function mergeFixtures(sources: string[], dest: string): string {
 }
 
 // generation: a new id for each new volume; fresh: made by bin/check run
-// --fresh. Both are labels on the volume and the server container.
-export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; generation: string; fresh: boolean; javaOpts?: string; memory?: string };
+// --fresh. Both are labels on the volume and the server container. commit
+// and source are the checkout this boot came from: on the container they
+// override the image's, which name whichever commit first built that tree.
+export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; generation: string; fresh: boolean; commit: string; source: string; javaOpts?: string; memory?: string };
 
 // Network, volume, server and relay. No published port: bin/dev join adds a
 // proxy. The RCON password reaches docker through its environment, never argv.
@@ -102,7 +104,7 @@ export function createPod(p: Pod, s: Spec, d: Docker): void {
   const gen = ['--label', `mc-harness.generation=${s.generation}`, '--label', `mc-harness.fresh=${s.fresh}`];
   must(d, ['volume', 'create', ...labelArgs(p), ...gen, n.vol]);
   const run = ['run', '-d', '--name', n.server, '--hostname', `mc-${p.pod}`, '--network', n.net, ...labelArgs(p)];
-  run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`, ...gen);
+  run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`, ...gen, '--label', `mc-harness.commit=${s.commit}`, '--label', `mc-harness.source=${s.source}`);
   run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', 'RCON_PASSWORD', '-e', `MC_JAR=${s.jar}`);
   for (const host of EGRESS_SINKS) run.push('--add-host', `${host}:127.0.0.1`);
   if (s.javaOpts) run.push('-e', `JAVA_OPTS=${s.javaOpts}`);
@@ -144,18 +146,18 @@ export function relayRequest(p: Pod, d: Docker, req: { op: string } & Record<str
   return reply;
 }
 
-// Generations a human touched (bin/dev console, join): their reds don't count
-// for the gate (G9). Kept in the pod's directory, one id per line.
-export function markExplored(p: Pod, generation: string): void {
-  if (isExplored(p, generation)) return;
-  const n = names(p);
-  privateDir(n.dir);
-  appendFileSync(join(n.dir, 'explored'), `${generation}\n`, { mode: 0o600 });
+// A volume a human touched (bin/dev console, join) carries this marker, so
+// its runs don't count for the gate (G9). It lives in the volume itself:
+// it goes with the volume (rebuild, --fresh) and survives restart, reset and
+// a deleted .dev/.
+export const EXPLORED = '/server/.mc-harness-explored';
+
+export function markExplored(p: Pod, d: Docker): void {
+  must(d, ['exec', names(p).server, 'touch', EXPLORED]);
 }
 
-export function isExplored(p: Pod, generation: string): boolean {
-  const f = join(names(p).dir, 'explored');
-  return existsSync(f) && readFileSync(f, 'utf8').split('\n').includes(generation);
+export function isExplored(p: Pod, d: Docker): boolean {
+  return d(['exec', names(p).server, 'test', '-e', EXPLORED]).status === 0;
 }
 
 function ids(d: Docker, kind: 'container' | 'volume' | 'network', filters: string[]): string[] {

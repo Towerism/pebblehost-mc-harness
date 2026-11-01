@@ -8,7 +8,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rea
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DevError, type Docker } from '../../src/dev/docker.ts';
-import { build, buildContext, chooseJar, dirHash, HARNESS_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
+import { build, buildContext, chooseJar, dirHash, dirtyHarness, HARNESS_INPUTS, RELAY_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
 import { applyOverrides, OVERRIDES, setProperty, setYaml } from '../../src/dev/overrides.ts';
 import { bootTimeout, createJoin, createPod, EGRESS_SINKS, formatBootReport, mergeFixtures, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
 
@@ -271,7 +271,7 @@ test('pruneImages keeps the new server and relay images and images a container u
 test('createPod: internal IPv4-only network without a gateway, labelled volume, no published port', () => {
   const p = podOf(tmp(), 'dev');
   const { d, calls, envs } = recorder();
-  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false }, d);
+  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false, commit: 'c0ffee', source: 'archive' }, d);
   const labels = ['--label', `mc-harness.project=${p.project}`, '--label', 'mc-harness.pod=dev'];
   const prefix = `mc-${p.project}-dev`;
   assert.deepEqual(calls[0], ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labels, `${prefix}-net`]);
@@ -279,7 +279,7 @@ test('createPod: internal IPv4-only network without a gateway, labelled volume, 
   assert.deepEqual(calls[1], ['volume', 'create', ...labels, ...gen, `${prefix}-server`]);
   const run = calls[2];
   assert.deepEqual(run.slice(0, 8), ['run', '-d', '--name', `${prefix}-server`, '--hostname', 'mc-dev', '--network', `${prefix}-net`]);
-  const pairs = [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], gen, ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '4096'], ['-e', 'MC_JAR=purpur.jar'], ['--add-host', 'bstats.org:127.0.0.1']];
+  const pairs = [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], gen, ['--label', 'mc-harness.commit=c0ffee'], ['--label', 'mc-harness.source=archive'], ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '4096'], ['-e', 'MC_JAR=purpur.jar'], ['--add-host', 'bstats.org:127.0.0.1']];
   for (const pair of pairs) assert.ok(run.join('\0').includes(pair.join('\0')), pair.join(' '));
   assert.ok(!run.some((a) => a === '-p' || a.startsWith('--publish') || a === '-P' || a === '--memory'));
   assert.ok(!run.some((a) => a.startsWith('RCON_PASSWORD=') || a.includes('pw')), 'RCON password in argv');
@@ -299,7 +299,7 @@ test('createPod: internal IPv4-only network without a gateway, labelled volume, 
   assert.equal(relay[relay.length - 1], 'mc-relay:r1');
   assert.equal(calls.length, 4);
   const mem = recorder();
-  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false, memory: '6g' }, mem.d);
+  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false, commit: 'c0ffee', source: 'archive', memory: '6g' }, mem.d);
   assert.ok(mem.calls[2].join('\0').includes(['--memory', '6g'].join('\0')));
 });
 
@@ -328,6 +328,15 @@ test('removePod removes the pod by label, containers first; --all drops the pod 
   assert.deepEqual(all.calls[0], ['ps', '-aq', '--filter', `label=mc-harness.project=${p.project}`]);
   assert.deepEqual(all.calls.slice(-2), [['image', 'ls', '-q', '--filter', `label=mc-harness.project=${p.project}`], ['image', 'rm', '-f', 'i1', 'i2']]);
   assert.ok(!calls.some((c) => c[0] === 'image'), 'a plain down keeps the image');
+});
+
+test('dirtyHarness lists uncommitted image and relay inputs only', () => {
+  const files = Object.fromEntries([...HARNESS_INPUTS, ...RELAY_INPUTS, 'README.md'].map((f) => [f, 'x\n']));
+  const root = gitRepo(files);
+  assert.deepEqual(dirtyHarness(root), []);
+  write(root, { 'docker/entrypoint.sh': 'y\n', 'src/relay/rcon.ts': 'y\n', 'README.md': 'y\n' });
+  assert.deepEqual(dirtyHarness(root), [' M docker/entrypoint.sh', ' M src/relay/rcon.ts']);
+  assert.throws(() => dirtyHarness(tmp()), /cannot check the harness/);
 });
 
 test('pod names are validated', () => {
