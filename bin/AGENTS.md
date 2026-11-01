@@ -9,7 +9,8 @@ The `mc` command: list, pull, diff and push the server's files over SFTP.
 ## Key Files
 | File | Description |
 |------|-------------|
-| `path-guard` | Bash shim that runs `src/guard/cli.ts` with Node: `--staged` or `--range A..B`, `--profile public\|private`; exit 2 lists every refused path with its reason |
+| `path-guard` | Bash shim that runs `src/guard/cli.ts` with Node: `--staged`, `--range A..B` or `--history REV`, `--profile public\|private`; exit 2 lists every refused path with its reason |
+| `install-hooks` | Run by `make hooks`: writes `pre-commit`, `pre-push` and `pre-merge-commit` stubs to the shared hooks directory that exec the current checkout's `hooks/<name>`, or exit 2 when it is missing; refuses to overwrite a hook it didn't write |
 | `mc` | Bash script. Parses `.env` without sourcing it, maps it to `RCLONE_CONFIG_PEBBLE_*` environment variables (password obscured through stdin), and runs rclone with `RCLONE_CONFIG=/dev/null` |
 
 ## For AI Agents

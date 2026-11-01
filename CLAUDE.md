@@ -30,7 +30,7 @@ Exit codes: 0 ok, 1 differences found (`diff` only), 2 error.
 - `pull`, `diff` and `push` on the server root need `--all`; don't use it without the user asking.
 - While the server runs, plugins rewrite their data files at any time. Push config files, not whole data folders.
 
-`server/`, `backups/` and `.mc/` are git-ignored: server files can hold plugin database passwords and must not be committed to this public repo. Run `make hooks` once per clone: the pre-commit and pre-push hooks run `bin/path-guard`, which refuses any path outside the public allowlist (exit 2). If something leaks anyway, follow `docs/leak-response.md`.
+`server/`, `backups/` and `.mc/` are git-ignored: server files can hold plugin database passwords and must not be committed to this public repo. Run `make hooks` once per clone; it covers every worktree. The pre-commit, pre-merge-commit and pre-push hooks run `bin/path-guard`, which refuses (exit 2) any path outside the public allowlist, any symlink, and any copy of a file under `server/`, `backups/` or `.mc/`. Never bypass it with `--no-verify`. If something leaks anyway, follow `docs/leak-response.md`.
 
 ## Taking a task
 

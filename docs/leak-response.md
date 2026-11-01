@@ -32,5 +32,6 @@ Rewriting the branch does not remove the commit from GitHub: it stays reachable 
 
 ## 4. Close the gap
 
-- Run `make hooks` in every clone and worktree you commit from, so the pre-commit and pre-push hooks run.
+- Run `make hooks` once in every clone you commit from. It installs stubs in the shared hooks directory, so all of that clone's worktrees run the guard, and a checkout without `hooks/` refuses to commit or push.
+- Cherry-pick and rebase skip the commit hooks; `pre-push` and CI still check every new commit.
 - If the guard let the path through, add a deny rule and a test for it in `src/guard/paths.ts` and `test/ts/guard.test.ts`.
