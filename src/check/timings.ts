@@ -11,6 +11,8 @@ export type Timings = {
   image: { cacheHit: boolean; seconds: number } | null;
   unit: TestTime[];
   profiles: { pod: string; key: string; reset: string; boot: number; teardown: number; tests: TestTime[] }[];
+  // Checks that could not run: a bad profile, conflicting fixtures, no tests.
+  refused: { check: string; reason: string }[];
   total: number;
   budget: number | null;
   over: number | null;
@@ -44,6 +46,7 @@ export function formatTimings(t: Timings): string {
     for (const x of p.tests) rows.push([`  ${x.check}`, `${s(x.seconds)} ${x.pass ? 'pass' : 'FAIL'}`]);
     rows.push([`teardown ${p.pod}`, s(p.teardown)]);
   }
+  for (const r of t.refused) rows.push([`refused ${r.check}`, r.reason.split('\n')[0]]);
   rows.push(['total', `${s(t.total)}${t.budget === null ? '' : ` (budget ${s(t.budget)})`}`]);
   const w = Math.max(...rows.map(([k]) => k.length));
   const lines = rows.map(([k, v]) => `${k.padEnd(w)}  ${v}`);

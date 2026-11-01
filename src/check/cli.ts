@@ -1,6 +1,7 @@
 // bin/check: run checks, record them, and gate the red→green pair.
 // Exit 0 ok (a check that passed), 1 a check that failed (recorded), 2
 // refused or failed to run. Never prompts.
+import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail } from '../dev/docker.ts';
@@ -12,7 +13,7 @@ import { confirmCheck, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
 import { issueOf, readRecords, runsFile, type Kind, type RunRecord } from './record.ts';
 import { readProfile } from './profile.ts';
 import { runCheck } from './run.ts';
-import { runSuite } from './suite.ts';
+import { runSuite, teardownSuitePods } from './suite.ts';
 import { formatTimings } from './timings.ts';
 
 const USAGE = `usage: check <command> <id> [options]
@@ -91,15 +92,59 @@ function verdict(root: string, id: string, issue: number, records: RunRecord[]):
   return { ...evaluate(records, { id, issue, kind, ...bare }, gitRepo(root)), kind };
 }
 
+function suiteParent(root: string, argv: string[]): void {
+  const child = spawn(process.execPath, [import.meta.filename, ...argv], { stdio: 'inherit', detached: true, env: { ...process.env, MC_SUITE_CHILD: '1' } });
+  let signal: NodeJS.Signals | null = null;
+  const stop = (sig: NodeJS.Signals) => {
+    if (signal) return;
+    signal = sig;
+    process.stderr.write(`check: ${sig}: stopping the suite\n`);
+    try {
+      process.kill(-(child.pid as number), 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  child.on('exit', (code) => {
+    if (signal === null) process.exit(code ?? 2);
+    // A docker call the kill cut short can still finish creating its
+    // resource a moment later: sweep again until a pass finds nothing.
+    let removed = 0;
+    for (let pass = 0; pass < 5; pass++) {
+      let n = 0;
+      try {
+        n = teardownSuitePods(root, d);
+      } catch (e) {
+        process.stderr.write(`check: teardown after ${signal}: ${(e as Error).message}\n`);
+        n = -1;
+      }
+      if (n === 0 && pass > 0) break;
+      removed += Math.max(n, 0);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
+    say(`suite: ${signal}: removed ${removed} suite resource(s)`);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  });
+}
+
 function main(argv: string[]) {
   const { cmd, o } = parse(argv);
   const root = resolve(process.env.MC_HOME || HARNESS_ROOT);
   if (!['run', 'gate', 'postmortem', 'runbook', 'suite'].includes(cmd)) fail(`unknown command ${cmd}\n${USAGE}`);
   if (cmd === 'suite') {
     if (o.id !== undefined) fail(`suite takes no check id\n${USAGE}`);
-    const { timings, file, failed } = runSuite({ root, timeoutS: o.timeout, jar: o.jar, heap: o.heap }, d);
+    // The suite is synchronous end to end, so it runs in a child whose
+    // parent can react to SIGINT/SIGTERM: kill the child's process group,
+    // remove every suite pod by label, exit 130/143.
+    if (process.env.MC_SUITE_CHILD !== '1') {
+      suiteParent(root, argv);
+      return;
+    }
+    const { timings, file, checks, failed } = runSuite({ root, timeoutS: o.timeout, jar: o.jar, heap: o.heap }, d);
     say(formatTimings(timings));
-    say(`suite: ${timings.unit.length + timings.profiles.reduce((n, p) => n + p.tests.length, 0)} check(s), ${failed.length} failed${failed.length ? ` (${failed.join(', ')})` : ''}; ${timings.profiles.length} pod(s); timings in ${file}`);
+    say(`suite: ${checks} check(s), ${failed.length} failed or refused${failed.length ? ` (${failed.join(', ')})` : ''}; ${timings.profiles.length} pod(s); timings in ${file}`);
     process.exitCode = failed.length > 0 ? 1 : 0;
     return;
   }

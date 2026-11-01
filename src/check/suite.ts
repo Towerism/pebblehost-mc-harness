@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boot } from '../dev/cli.ts';
-import { fail, must, type Docker } from '../dev/docker.ts';
+import { DevError, fail, must, type Docker } from '../dev/docker.ts';
 import { dirtyServer, privateDir, source, walk } from '../dev/image.ts';
 import { mergeFixtures, names, podOf, readPodFile, removePod, restartServer, type Pod } from '../dev/pod.ts';
 import { fixtureDirs, isData, readProfile, type Profile } from './profile.ts';
@@ -42,7 +42,7 @@ export function planSuite(checks: SuiteCheck[]): Plan {
 }
 
 export type SuiteOpts = { root: string; timeoutS: number; jar?: string; heap?: string };
-export type SuiteResult = { timings: Timings; file: string; failed: string[] };
+export type SuiteResult = { timings: Timings; file: string; checks: number; failed: string[] };
 
 const say = (msg: string) => process.stdout.write(`${msg}\n`);
 
@@ -55,27 +55,44 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
   const dir = join(o.root, 'checks');
   const ids = existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && existsSync(join(dir, e.name, 'profile.json'))).map((e) => e.name) : [];
   if (ids.length === 0) fail('no checks/<id>/profile.json to run');
-  const info = new Map<string, Info>(ids.map((id) => {
-    const profile = readProfile(o.root, id);
-    const files = committedTests(o.root, id, checkHash(o.root, id), profile);
-    const fixtures = fixtureDirs(o.root, id, profile);
+  // A check that can't run (bad profile, fixture conflict, uncommitted,
+  // no tests) is refused alone; the others still run.
+  const refused: { check: string; reason: string }[] = [];
+  const refuse = (check: string, e: unknown) => {
+    if (!(e instanceof DevError)) throw e;
+    refused.push({ check, reason: e.message });
+    say(`REFUSED ${check}: ${e.message.split('\n')[0]}`);
+  };
+  const info = new Map<string, Info>();
+  for (const id of ids) {
     const tmp = mkdtempSync(join(tmpdir(), 'suite-fx-'));
     try {
+      const profile = readProfile(o.root, id);
+      const files = committedTests(o.root, id, checkHash(o.root, id), profile);
+      const fixtures = fixtureDirs(o.root, id, profile);
       const fixturesHash = mergeFixtures(fixtures, tmp);
       const hasData = profile.data.length > 0 || walk(tmp).some((rel) => isData(rel, profile));
-      return [id, { id, profile, files, fixtures, fixturesHash, hasData }];
+      info.set(id, { id, profile, files, fixtures, fixturesHash, hasData });
+    } catch (e) {
+      refuse(id, e);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
-  }));
+  }
   const plan = planSuite([...info.values()]);
   const dev = readPodFile(podOf(o.root, 'dev'));
   const t0 = Date.now();
-  const timings: Timings = { started: new Date().toISOString(), commit: src.commit, image: null, unit: [], profiles: [], total: 0, budget: readBudget(o.root), over: null };
+  const timings: Timings = { started: new Date().toISOString(), commit: src.commit, image: null, unit: [], profiles: [], refused, total: 0, budget: readBudget(o.root), over: null };
   const failed: string[] = [];
   const test = (id: string, pod: string) => {
     const c = info.get(id) as Info;
-    const r = runTests(o.root, id, c.files, checkEnv(o.root, id, pod, src.commit, c.profile), o.timeoutS);
+    let r: ReturnType<typeof runTests>;
+    try {
+      r = runTests(o.root, id, c.files, checkEnv(o.root, id, pod, src.commit, c.profile), o.timeoutS);
+    } catch (e) {
+      refuse(id, e);
+      return { check: id, pass: false, seconds: 0 };
+    }
     say(`${r.pass ? 'PASS' : 'FAIL'} ${id} (${r.seconds.toFixed(1)}s)`);
     if (!r.pass) {
       failed.push(id);
@@ -83,7 +100,10 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
     }
     return { check: id, pass: r.pass, seconds: r.seconds };
   };
-  // Pods still up; torn down on the way out, also on SIGINT/SIGTERM.
+  // Pods still up; torn down on the way out. bin/check suite runs this in a
+  // child process; on SIGINT/SIGTERM its parent kills it and removes every
+  // suite pod by label (teardownSuitePods), since nothing here can yield to
+  // a signal handler.
   const up: Pod[] = [];
   const teardown = (p: Pod) => {
     removePod(p, false, d);
@@ -98,12 +118,6 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
       }
     }
   };
-  const onSignal = (sig: NodeJS.Signals) => {
-    cleanup();
-    process.exit(sig === 'SIGINT' ? 130 : 143);
-  };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
   try {
     for (const id of plan.unit) timings.unit.push(test(id, 'dev'));
     plan.groups.forEach((g, i) => {
@@ -124,8 +138,6 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
     });
   } finally {
     cleanup();
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
   }
   timings.total = (Date.now() - t0) / 1000;
   if (timings.budget !== null && timings.total > timings.budget) timings.over = timings.total - timings.budget;
@@ -133,5 +145,18 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
   const out = privateDir(join(runs, timings.started.replace(/[:.]/g, '-')));
   const file = join(out, 'timings.json');
   writeTimings(file, timings);
-  return { timings, file, failed };
+  return { timings, file, checks: ids.length, failed: [...refused.map((r) => r.check), ...failed] };
+}
+
+// Remove every suite pod of the project (labels mc-harness.pod=suite<N>):
+// containers, volumes and networks. Returns how many resources went.
+export function teardownSuitePods(root: string, d: Docker): number {
+  const project = podOf(root, 'dev').project;
+  const pods = new Set<string>();
+  for (const args of [['ps', '-a'], ['volume', 'ls'], ['network', 'ls']]) {
+    for (const pod of must(d, [...args, '--filter', `label=mc-harness.project=${project}`, '--format', '{{.Label "mc-harness.pod"}}']).split('\n')) if (/^suite\d+$/.test(pod)) pods.add(pod);
+  }
+  let n = 0;
+  for (const pod of pods) n += removePod(podOf(root, pod), false, d);
+  return n;
 }

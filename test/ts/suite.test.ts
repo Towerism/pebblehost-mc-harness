@@ -77,11 +77,11 @@ test('dev.restart and dev.reset refuse a check that did not declare restart or e
   assert.equal(checkEnv(root, 'x', 'dev', 'c', P({ exclusive: true })).MC_RESTART_OK, '1');
 });
 
-const T = (o: Partial<Timings> = {}): Timings => ({ started: 't', commit: 'c', image: { cacheHit: true, seconds: 0.1 }, unit: [{ check: 'u', pass: true, seconds: 0.3 }], profiles: [{ pod: 'suite0', key: 'k', reset: 'none', boot: 12.34, teardown: 1, tests: [{ check: 'a', pass: true, seconds: 0.5 }, { check: 'b', pass: false, seconds: 0.7 }] }], total: 20, budget: null, over: null, ...o });
+const T = (o: Partial<Timings> = {}): Timings => ({ started: 't', commit: 'c', image: { cacheHit: true, seconds: 0.1 }, unit: [{ check: 'u', pass: true, seconds: 0.3 }], profiles: [{ pod: 'suite0', key: 'k', reset: 'none', boot: 12.34, teardown: 1, tests: [{ check: 'a', pass: true, seconds: 0.5 }, { check: 'b', pass: false, seconds: 0.7 }] }], refused: [{ check: 'c', reason: 'fixture conflict: x\nmore' }], total: 20, budget: null, over: null, ...o });
 
 test('formatTimings prints every phase, the budget and OVER BUDGET', () => {
   const out = formatTimings(T());
-  for (const part of [/^image \(cache hit\) +0\.1s$/m, /^unit u +0\.3s pass$/m, /^boot suite0 \(2 check\(s\), reset: none\) +12\.3s$/m, /^ {2}b +0\.7s FAIL$/m, /^teardown suite0 +1\.0s$/m, /^total +20\.0s$/m]) assert.match(out, part);
+  for (const part of [/^image \(cache hit\) +0\.1s$/m, /^unit u +0\.3s pass$/m, /^boot suite0 \(2 check\(s\), reset: none\) +12\.3s$/m, /^ {2}b +0\.7s FAIL$/m, /^teardown suite0 +1\.0s$/m, /^refused c +fixture conflict: x$/m, /^total +20\.0s$/m]) assert.match(out, part);
   assert.doesNotMatch(out, /OVER BUDGET/);
   assert.match(formatTimings(T({ budget: 15, over: 5 })), /total +20\.0s \(budget 15\.0s\)\nOVER BUDGET by 5\.0s$/);
 });
@@ -103,4 +103,23 @@ test('bin/check suite refuses a project without checks and an id', () => {
   r = check(root, {}, 'suite', 'x');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /suite takes no check id/);
+});
+
+const BARE = "import { test, bareText } from '#harness/unit';\ntest('name', () => bareText('config.yml', 'crate.name', 'Vote Crate'));\n";
+
+test('one check that cannot run is refused alone; the rest of the suite runs and the exit is 1', () => {
+  const root = project({
+    'checks/3-crate/profile.json': '{"kind":"bare-text"}\n',
+    'checks/3-crate/a.test.ts': BARE,
+    'checks/3-bad/profile.json': '{"kind":"e2e","fixtures":["a","b"]}\n',
+    'checks/3-bad/a.test.ts': "import { test } from 'node:test';\ntest('x', () => {});\n",
+    'checks/3-bad/a/same.txt': 'one\n',
+    'checks/3-bad/b/same.txt': 'two\n',
+  });
+  const r = check(root, {}, 'suite');
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^REFUSED 3-bad: fixture conflict: same\.txt differs/m);
+  assert.match(r.stdout, /^PASS 3-crate/m);
+  assert.match(r.stdout, /^refused 3-bad +fixture conflict/m);
+  assert.match(r.stdout, /suite: 2 check\(s\), 1 failed or refused \(3-bad\); 0 pod\(s\)/);
 });
