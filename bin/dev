@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# dev: run the server tree as an isolated, offline dev pod. See src/dev/cli.ts.
+set -euo pipefail
+
+exec node "$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/dev/cli.ts" "$@"
