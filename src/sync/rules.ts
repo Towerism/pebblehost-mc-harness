@@ -36,21 +36,35 @@ export function readRules(dir: string): Rule[] {
   return parseRules(readFileSync(file, 'utf8'), file);
 }
 
-const glob = (p: string) => p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\0').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replace(/\0/g, '.*');
+// gitignore globs: `**/` at the start and `/**/` inside match zero or more
+// directories, any other `**` anything, `*` and `?` within one name.
+const glob = (p: string) =>
+  p
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\/\*\*\//g, '/\x01')
+    .replace(/^\*\*\//, '\x01')
+    .replace(/\*\*/g, '\0')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replace(/\x01/g, '(?:.*/)?')
+    .replace(/\0/g, '.*');
 
 // A pattern with a slash before its end is anchored at the server root;
 // without one it matches a name at any depth. Either way it also matches
 // everything below a matching directory.
-export function ruleRegex(pattern: string): RegExp {
+// A pattern ending in / matches directories only: for a file path, only
+// what lies below such a directory (`dir` says rel is a directory).
+export function ruleRegex(pattern: string, dir = false): RegExp {
   const p = pattern.replace(/\/+$/, '');
   const anchored = p.includes('/');
   const body = glob(p.replace(/^\/+/, ''));
-  return new RegExp(`${anchored ? '^' : '(^|/)'}${body}(/.*)?$`);
+  const below = pattern.endsWith('/') && !dir ? '/.*' : '(/.*)?';
+  return new RegExp(`${anchored ? '^' : '(^|/)'}${body}${below}$`);
 }
 
 // The first rule of the given classes matching a server-relative path.
-export function matchRule(rules: Rule[], rel: string, classes: RuleClass[] = ['skip', 'data']): Rule | undefined {
-  return rules.find((r) => classes.includes(r.cls) && ruleRegex(r.pattern).test(rel));
+export function matchRule(rules: Rule[], rel: string, classes: RuleClass[] = ['skip', 'data'], dir = false): Rule | undefined {
+  return rules.find((r) => classes.includes(r.cls) && ruleRegex(r.pattern, dir).test(rel));
 }
 
 // An rclone exclude file (bin/mc MC_EXCLUDE_FILE) for the given classes, for
@@ -65,9 +79,10 @@ export function rcloneExcludes(rules: Rule[], classes: RuleClass[], base = ''): 
     if (!r.pattern.replace(/\/+$/, '').includes('/')) pat = p;
     else if (b === '') pat = `/${p}`;
     else if (p.startsWith(`${b}/`)) pat = `/${p.slice(b.length + 1)}`;
-    else if (ruleRegex(r.pattern).test(b)) pat = '';
+    else if (ruleRegex(r.pattern, true).test(b)) pat = '';
     else continue;
-    out.push(...(pat === '' ? ['/**'] : [pat, `${pat}/**`]));
+    // A directory-only rule leaves a file of that name alone.
+    out.push(...(pat === '' ? ['/**'] : r.pattern.endsWith('/') ? [`${pat}/**`] : [pat, `${pat}/**`]));
   }
   return out.length ? `${out.join('\n')}\n` : '';
 }
