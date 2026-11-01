@@ -103,8 +103,13 @@ label() {
   run dev bot join Steve
   [ "$status" -eq 0 ]
   [ "$output" = 'bot: Steve joined' ]
+  # A second join right away: the connection-throttle override lets it in.
+  run dev bot join Alex
+  [ "$status" -eq 0 ]
   run dev console list
-  [[ $output == "There are 1 of a max of 20 players online: Steve" ]]
+  [[ $output == "There are 2 of a max of 20 players online: "* && $output == *Steve* && $output == *Alex* ]]
+  run dev bot quit Alex
+  [ "$status" -eq 0 ]
   run dev bot chat Steve hello from the bot
   [ "$status" -eq 0 ]
   timeout 10 bash -c 'until docker logs "$1" 2>&1 | grep "<Steve> hello from the bot" >/dev/null; do sleep 0.5; done' _ "$SERVER"

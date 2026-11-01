@@ -202,6 +202,41 @@ EOF
   [[ $output == *"G9: the red's volume "*" was explored"* ]]
 }
 
+@test "a bot a check leaves joined, or a check that fails mid-way, never leaks into the next run" {
+  for id in 7-bot 7-bot-fail; do
+    mkdir -p "$MC_HOME/checks/$id"
+    echo '{"kind":"e2e","needs":["bot"]}' >"$MC_HOME/checks/$id/profile.json"
+  done
+  cat >"$MC_HOME/checks/7-bot/a.test.ts" <<'EOF'
+import { test } from 'node:test';
+import { bot } from '#harness/bot';
+test('joins and stays', async () => {
+  await bot.join('Botty');
+});
+EOF
+  cat >"$MC_HOME/checks/7-bot-fail/a.test.ts" <<'EOF'
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { bot } from '#harness/bot';
+test('joins, then fails', async () => {
+  await bot.join('Botty');
+  assert.fail('on purpose');
+});
+EOF
+  git -C "$MC_HOME" add checks
+  git -C "$MC_HOME" commit -q -m 'bot checks'
+  for _ in 1 2; do
+    ISSUE=10 run check run 7-bot
+    [ "$status" -eq 0 ]
+  done
+  ISSUE=10 run check run 7-bot-fail
+  [ "$status" -eq 1 ]
+  ISSUE=10 run check run 7-bot
+  [ "$status" -eq 0 ]
+  run dev console list
+  [[ $output == "There are 0 of a max"* ]]
+}
+
 @test "two runs at once on a new volume: positions come from the log, and the overlap is flagged" {
   run dev rebuild
   [ "$status" -eq 0 ]
