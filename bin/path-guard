@@ -3,4 +3,4 @@
 # public repo. See src/guard/paths.ts for the rules.
 set -euo pipefail
 
-exec node "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/guard/cli.ts" "$@"
+exec node "$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/guard/cli.ts" "$@"
