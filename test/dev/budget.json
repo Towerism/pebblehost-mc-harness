@@ -2,5 +2,14 @@
   "server": "purpur 26.1.2 build 2592, vanilla, flat world, view-distance 3",
   "measured": "2026-11-01",
   "doneSeconds": { "firstBoot": 4.75, "restartMedian": 4.06 },
-  "wallSeconds": { "upWithImageBuild": 23.6, "restart": 7.2 }
+  "wallSeconds": { "upWithImageBuild": 23.6, "restart": 7.2 },
+  "live": {
+    "server": "live copy (purpur 26.1.2 build 2592), plain-copy build, heap 6G, fresh world",
+    "measured": "2026-11-01",
+    "pluginsEnabledOfLive": [62, 64],
+    "doneSeconds": { "firstBoot": 21.7, "restarts": [20.2, 20.1, 20.0], "restartMedian": 20.1, "liveLog": 34.7 },
+    "wallSeconds": { "firstBootFromCreate": 23.5, "restartMedian": 23.7, "volumeCopyUp": 0.4 },
+    "imageBuildSeconds": { "cold": 20.7, "configOnly": 15.8 },
+    "imageBytes": 1062128829
+  }
 }
