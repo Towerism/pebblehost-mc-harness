@@ -1,14 +1,14 @@
 // bin/check run: run checks/<id>/*.test.ts with node --test against the pod
 // (e2e) or the committed tree (bare-text), then append a run record.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { boot } from '../dev/cli.ts';
 import { fail, type Docker } from '../dev/docker.ts';
 import { dirtyHarness, dirtyServer, git, labels, source, toolHash } from '../dev/image.ts';
-import { isExplored, logRun, names, podOf, readPodFile, state } from '../dev/pod.ts';
+import { isExplored, logRun, names, podOf, readPodFile, runPosition, state, type Pod } from '../dev/pod.ts';
 import { appendRecord, type Kind, type RunRecord } from './record.ts';
 
 export type Profile = { kind: Kind };
@@ -66,8 +66,10 @@ export function runCheck(o: RunOpts, d: Docker): Run {
   const extra = entries.filter((e) => !(e.isFile() && (e.name === 'profile.json' || e.name.endsWith('.test.ts')))).map((e) => e.name);
   if (kind === 'bare-text' && extra.length > 0) fail(`checks/${o.id} is bare-text: only profile.json and *.test.ts are allowed, not ${extra.join(', ')}`);
   const p = podOf(o.root, o.pod);
-  let id: Pick<RunRecord, 'source' | 'commit' | 'treeHash' | 'harnessHash' | 'imageHash' | 'fixturesHash' | 'generation' | 'fresh' | 'explored' | 'containerId' | 'runIndex'>;
+  let id: Pick<RunRecord, 'source' | 'commit' | 'treeHash' | 'harnessHash' | 'imageHash' | 'fixturesHash' | 'generation' | 'fresh' | 'explored' | 'containerId' | 'runIndex' | 'concurrent'>;
   const time = new Date().toISOString();
+  // e2e: the run's line in the volume's run log; its position is read after the run.
+  let logged: { pod: Pod; nonce: string } | null = null;
   if (kind === 'e2e') {
     if (o.fresh) boot(p, readPodFile(p), undefined, true, true);
     const server = names(p).server;
@@ -76,20 +78,21 @@ export function runCheck(o: RunOpts, d: Docker): Run {
     const l = labels(d, server);
     const gen = l['mc-harness.generation'] ?? '';
     const containerId = d(['inspect', '--format', '{{.Id}}', server]).stdout.trim();
-    id = { source: l['mc-harness.source'] ?? '', commit: l['mc-harness.commit'] ?? '', treeHash: l['mc-harness.tree'] ?? '', harnessHash: l['mc-harness.harness'] ?? '', imageHash: l['mc-harness.image'] ?? '', fixturesHash: l['mc-harness.fixtures'] ?? '', generation: gen, fresh: l['mc-harness.fresh'] === 'true', explored: isExplored(p, d), containerId, runIndex: logRun(p, d, `${time} issue-${o.issue} ${o.id}${o.confirm ? ' confirm' : ''}`) };
+    id = { source: l['mc-harness.source'] ?? '', commit: l['mc-harness.commit'] ?? '', treeHash: l['mc-harness.tree'] ?? '', harnessHash: l['mc-harness.harness'] ?? '', imageHash: l['mc-harness.image'] ?? '', fixturesHash: l['mc-harness.fixtures'] ?? '', generation: gen, fresh: l['mc-harness.fresh'] === 'true', explored: isExplored(p, d), containerId, runIndex: 0, concurrent: false };
+    logged = { pod: p, nonce: logRun(p, d, `${time} issue-${o.issue} ${o.id}${o.confirm ? ' confirm' : ''}`) };
   } else {
     if (o.fresh) fail('--fresh is for e2e checks; a bare-text check needs no pod');
     const src = source(o.root);
     if (src.kind !== 'git') fail('a bare-text check reads the committed server/; server/ is not tracked');
     const dirty = dirtyServer(src);
     if (dirty.length > 0) fail(`server/ has uncommitted changes; a bare-text run reads HEAD, so commit them first:\n${dirty.join('\n')}`);
-    id = { source: 'head', commit: src.commit, treeHash: git(o.root, ['rev-parse', `${src.commit}:server`]).stdout.trim(), harnessHash: '', imageHash: '', fixturesHash: '', generation: '', fresh: false, explored: false, containerId: '', runIndex: 0 };
+    id = { source: 'head', commit: src.commit, treeHash: git(o.root, ['rev-parse', `${src.commit}:server`]).stdout.trim(), harnessHash: '', imageHash: '', fixturesHash: '', generation: '', fresh: false, explored: false, containerId: '', runIndex: 0, concurrent: false };
   }
   const tmp = mkdtempSync(join(tmpdir(), 'check-'));
   try {
     const tap = join(tmp, 'tap');
     const files = tests.map((t) => `checks/${o.id}/${t}`);
-    const env: Record<string, string> = { MC_HOME: o.root, MC_POD: o.pod, MC_TARGET: 'dev', MC_COMMIT: id.commit };
+    const env: Record<string, string> = { MC_HOME: o.root, MC_POD: o.pod, MC_TARGET: 'dev', MC_COMMIT: id.commit, MC_CHECK_DIR: realpathSync(join(o.root, 'checks', o.id)) };
     for (const k of KEEP_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
     const args = ['--import', LOADER, '--test', '--test-isolation=none', '--test-reporter=spec', '--test-reporter-destination=stdout', '--test-reporter=tap', `--test-reporter-destination=${tap}`, ...files];
     const r = spawnSync(process.execPath, args, {
@@ -102,12 +105,20 @@ export function runCheck(o: RunOpts, d: Docker): Run {
     });
     const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
     if (r.error) fail(`node --test did not finish: ${r.error.message}\n${output}`);
+    const refused = output.split('\n').find((l) => l.includes('import refused:'));
+    if (refused) fail(`checks/${o.id} imports from outside its directory; nothing recorded\n${refused.trim()}`);
     // node --test reports a file that defines no test as one passing test
     // named after the file: that run proves nothing.
     const top = [...(existsSync(tap) ? readFileSync(tap, 'utf8') : '').matchAll(/^(not )?ok \d+ - (.*)$/gm)];
     const empty = files.filter((f) => top.some((m) => !m[1] && m[2] === f));
     if (top.length === 0 || empty.length > 0) fail(`${empty.join(', ') || `checks/${o.id}`} defines no test; nothing recorded\n${output}`);
     const pass = r.status === 0 && top.every((m) => !m[1]);
+    if (logged) {
+      const pos = runPosition(logged.pod, d, logged.nonce);
+      id.runIndex = pos.index;
+      id.concurrent = pos.index < 0 || pos.after > 0;
+      id.explored ||= isExplored(logged.pod, d);
+    }
     const record: RunRecord = { check: o.id, issue: o.issue, kind, target: 'dev', pass, time, ...id, checkHash: hash, toolHash: tool, confirm: o.confirm, output: output.trimEnd().split('\n').slice(-TAIL).join('\n') };
     appendRecord(o.root, record);
     return { record, output };

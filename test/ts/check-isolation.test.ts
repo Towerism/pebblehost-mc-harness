@@ -66,3 +66,40 @@ test('bareText ignores replace refs: a replaced blob never makes a red pass', ()
   const r = check(root, {}, 'run', '3-crate');
   assert.equal(r.status, 1, r.stdout + r.stderr);
 });
+
+test('a run another run interleaves with is flagged concurrent, and a marker set during the run counts as explored', () => {
+  const root = project({});
+  const log = join(root, 'fakefs/.mc-harness-runs');
+  commit(root, {
+    ...E2E,
+    // Stands in for a parallel bin/check run and a human on the console while this one runs.
+    'checks/3-motd/a.test.ts': `import { test } from 'node:test';\nimport { appendFileSync, writeFileSync } from 'node:fs';\ntest('meanwhile', () => {\n  appendFileSync(${JSON.stringify(log)}, 'x issue-3 other 00000000-0000-0000-0000-000000000000\\n');\n  writeFileSync(${JSON.stringify(join(root, 'fakefs/.mc-harness-explored'))}, '');\n});\n`,
+  });
+  const r = check(root, {}, 'run', '3-motd');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const [rec] = readRecords(root, 3);
+  assert.deepEqual([rec.runIndex, rec.concurrent, rec.explored], [0, true, true]);
+});
+
+test('a check imports only from its own directory: a sibling helper or a relative escape is refused, nothing recorded', () => {
+  const root = project({
+    'checks/lib/helper.ts': 'export const ok = true;\n',
+    'checks/3-a/profile.json': '{"kind":"e2e"}\n',
+    'checks/3-a/a.test.ts': "import { test } from 'node:test';\nimport { ok } from '../lib/helper.ts';\ntest('a', () => { if (!ok) throw new Error(); });\n",
+    'checks/3-b/profile.json': '{"kind":"e2e"}\n',
+    'checks/3-b/b.test.ts': "import { test } from 'node:test';\nimport { ok } from '../../server/x.ts';\ntest('b', () => { if (!ok) throw new Error(); });\n",
+    'server/x.ts': 'export const ok = true;\n',
+    'checks/3-c/profile.json': '{"kind":"e2e"}\n',
+    'checks/3-c/c.test.ts': "import { test } from 'node:test';\nimport { join } from 'node:path';\nimport { ok } from './own.ts';\ntest('c', () => { if (!ok || !join) throw new Error(); });\n",
+    'checks/3-c/own.ts': 'export const ok = true;\n',
+  });
+  for (const [id, spec] of [['3-a', '../lib/helper.ts'], ['3-b', '../../server/x.ts']]) {
+    const r = check(root, {}, 'run', id);
+    assert.equal(r.status, 2, `${id}: ${r.stdout}`);
+    assert.match(r.stderr, new RegExp(`imports from outside its directory; nothing recorded\\n.*${spec.replace(/[./]/g, '\\$&')}: a check imports only files in its own directory`));
+  }
+  // Its own files, node: built-ins: fine.
+  const r = check(root, {}, 'run', '3-c');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(readRecords(root, 3).length, 1);
+});

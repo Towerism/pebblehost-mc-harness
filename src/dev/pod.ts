@@ -2,7 +2,7 @@
 // egress), a named volume at /server and a read-only /fixtures, plus the relay
 // container (src/relay/) on that network only, which holds the RCON connection. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
@@ -165,14 +165,22 @@ export function isExplored(p: Pod, d: Docker): boolean {
 // can have changed the server before it.
 export const RUN_LOG = '/server/.mc-harness-runs';
 
-// Append a line to the volume's run log; returns how many runs it held before.
-export function logRun(p: Pod, d: Docker, line: string): number {
-  const server = names(p).server;
-  const prior = d(['exec', server, 'cat', RUN_LOG]);
-  const n = prior.status === 0 ? prior.stdout.split('\n').filter(Boolean).length : 0;
-  const r = d(['exec', '-i', server, 'sh', '-c', `cat >>${RUN_LOG}`], { input: `${line}\n` });
+// Append `line nonce` to the volume's run log in one O_APPEND write (no
+// read-then-write race); returns the nonce.
+export function logRun(p: Pod, d: Docker, line: string): string {
+  const nonce = randomUUID();
+  const r = d(['exec', '-i', names(p).server, 'sh', '-c', `cat >>${RUN_LOG}`], { input: `${line} ${nonce}\n` });
   if (r.status !== 0) fail(`cannot append to ${RUN_LOG}: ${r.stderr.trim()}`);
-  return n;
+  return nonce;
+}
+
+// Where the run's line sits in the log (-1: gone) and how many lines came
+// after it: read once the run is over, so a parallel run shows either way.
+export function runPosition(p: Pod, d: Docker, nonce: string): { index: number; after: number } {
+  const r = d(['exec', names(p).server, 'cat', RUN_LOG]);
+  const lines = r.status === 0 ? r.stdout.split('\n').filter(Boolean) : [];
+  const index = lines.findIndex((l) => l.endsWith(` ${nonce}`));
+  return { index, after: index < 0 ? 0 : lines.length - index - 1 };
 }
 
 function ids(d: Docker, kind: 'container' | 'volume' | 'network', filters: string[]): string[] {

@@ -372,6 +372,9 @@ test('dirtyHarness lists uncommitted image, relay and check code only; toolHash 
   const before = toolHash(root);
   write(root, { 'docker/entrypoint.sh': 'y\n', 'src/relay/rcon.ts': 'y\n', 'README.md': 'y\n' });
   assert.equal(toolHash(root), before);
+  // Ignored scratch files change neither.
+  write(root, { '.git/info/exclude': 'src/check/scratch.ts\n', 'src/check/scratch.ts': 's\n' });
+  assert.equal(toolHash(root), before);
   write(root, { 'src/gate/gate.ts': 'y\n', 'src/check/new.ts': 'z\n' });
   assert.deepEqual(dirtyHarness(root), [' M docker/entrypoint.sh', ' M src/gate/gate.ts', ' M src/relay/rcon.ts', '?? src/check/new.ts']);
   assert.notEqual(toolHash(root), before);

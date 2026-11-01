@@ -134,17 +134,10 @@ export function harnessHash(harnessRoot = HARNESS_ROOT): string {
   return h.digest('hex');
 }
 
+// Over the tracked files only: an ignored scratch file must not change it.
 export function toolHash(harnessRoot = HARNESS_ROOT): string {
   const h = createHash('sha256');
-  for (const dir of CHECK_DIRS) {
-    let files: string[];
-    try {
-      files = walk(join(harnessRoot, dir));
-    } catch {
-      continue;
-    }
-    for (const f of files) h.update(`${dir}/${f}\n${sha256(readFileSync(join(harnessRoot, dir, f)))}\n`);
-  }
+  for (const f of mustGit(harnessRoot, ['ls-files', '-z', '--', ...CHECK_DIRS]).split('\0').filter(Boolean).sort()) h.update(`${f}\n${sha256(readFileSync(join(harnessRoot, f)))}\n`);
   return h.digest('hex');
 }
 
