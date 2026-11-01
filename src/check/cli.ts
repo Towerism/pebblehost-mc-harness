@@ -5,10 +5,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail } from '../dev/docker.ts';
 import { HARNESS_ROOT, labels } from '../dev/image.ts';
-import { names, podOf, state } from '../dev/pod.ts';
-import { bareTextProblems } from '../gate/bareText.ts';
-import { confirmOf, writeDoc } from '../gate/docs.ts';
-import { evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
+import { isExplored, names, podOf, state } from '../dev/pod.ts';
+import { parseBareText } from '../gate/bareText.ts';
+import { writeDoc } from '../gate/docs.ts';
+import { confirmOf, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
 import { issueOf, readRecords, runsFile, type Kind, type RunRecord } from './record.ts';
 import { readProfile, runCheck } from './run.ts';
 
@@ -19,7 +19,7 @@ const USAGE = `usage: check <command> <id> [options]
                           pod (e2e) or the committed server/ (bare-text), and
                           append a record to .verify/runs/issue-N.jsonl
   gate <id> [--no-confirm] [--pod ID]
-                          check the red→green pair (rules G1-G9), then re-run
+                          check the red→green pair (rules G1-G10), then re-run
                           the green on the pod booted from its image
   postmortem <id>         write docs/postmortems/<date>-<N>-<slug>.md
   runbook <id>            write docs/runbooks/<date>-<N>-<slug>.md
@@ -56,16 +56,29 @@ function parse(argv: string[]): { cmd: string; o: Opts } {
 const say = (msg: string) => process.stdout.write(`${msg}\n`);
 const short = (s: string) => s.slice(0, 12);
 
-// G8 input: every test file of a bare-text check, as committed (G2 holds it clean).
-function staticProblems(root: string, id: string, kind: Kind): string[] {
-  if (kind !== 'bare-text') return [];
+// G8 and G4 input for a bare-text check: the problems of its files (G2
+// holds them clean; ignored files count too) and the server files read.
+function bareTextOf(root: string, id: string): { staticProblems: string[]; bareFiles: string[] } {
   const dir = join(root, 'checks', id);
-  return readdirSync(dir).filter((f) => f.endsWith('.test.ts')).sort().flatMap((f) => bareTextProblems(readFileSync(join(dir, f), 'utf8')).map((p) => `${f}: ${p}`));
+  const staticProblems: string[] = [];
+  const bareFiles: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (e.isFile() && e.name === 'profile.json') continue;
+    if (!e.isFile() || !e.name.endsWith('.test.ts')) {
+      staticProblems.push(`checks/${id}/${e.name}: a bare-text check holds only profile.json and *.test.ts`);
+      continue;
+    }
+    const { problems, files } = parseBareText(readFileSync(join(dir, e.name), 'utf8'));
+    staticProblems.push(...problems.map((p) => `${e.name}: ${p}`));
+    bareFiles.push(...files);
+  }
+  return { staticProblems, bareFiles: [...new Set(bareFiles)] };
 }
 
-function verdict(root: string, id: string, records: RunRecord[]): Verdict & { kind: Kind } {
+function verdict(root: string, id: string, issue: number, records: RunRecord[]): Verdict & { kind: Kind } {
   const { kind } = readProfile(root, id);
-  return { ...evaluate(records, id, kind, gitRepo(root), staticProblems(root, id, kind)), kind };
+  const bare = kind === 'bare-text' ? bareTextOf(root, id) : { staticProblems: [], bareFiles: [] };
+  return { ...evaluate(records, { id, issue, kind, ...bare }, gitRepo(root)), kind };
 }
 
 function main(argv: string[]) {
@@ -84,31 +97,35 @@ function main(argv: string[]) {
       break;
     }
     case 'gate': {
-      const v = verdict(root, o.id, readRecords(root, issue));
+      const v = verdict(root, o.id, issue, readRecords(root, issue));
       if (!v.ok) fail(`gate: ${o.id} refused:\n  ${v.reasons.join('\n  ')}`);
       say(`gate: ${o.id}: red ${v.red.time} on ${short(v.red.commit)}, green ${v.green.time} on ${short(v.green.commit)}`);
       if (!o.confirm) {
         say(`gate: ${o.id} passed, not confirmed; postmortem and runbook need bin/check gate ${o.id} with its confirm run`);
         break;
       }
-      // The confirm run needs the green's image running; the gate never boots one.
+      // The confirm run needs the green's image running on a volume nobody
+      // explored; the gate never boots one.
       if (v.kind === 'e2e') {
-        const server = names(podOf(root, o.pod)).server;
+        const p = podOf(root, o.pod);
+        const server = names(p).server;
         if (state(d, server) !== 'running' || labels(d, server)['mc-harness.image'] !== v.green.imageHash) fail(`gate: no running pod ${o.pod} booted from the green's image ${short(v.green.imageHash)}; run bin/dev rebuild first`);
+        if (isExplored(p, d)) fail(`gate: pod ${o.pod}'s volume was explored (bin/dev console or join); run bin/dev rebuild first`);
       }
       const { record, output } = runCheck({ root, id: o.id, issue, pod: o.pod, fresh: false, confirm: true, timeoutS: o.timeout }, d);
       process.stdout.write(output.endsWith('\n') || output === '' ? output : `${output}\n`);
       if (!record.pass) fail(`gate: the confirm run of ${o.id} failed; the green does not hold`);
-      say(`gate: ${o.id} passed and confirmed; recorded in ${runsFile(root, issue)}`);
+      if (JSON.stringify(confirmOf(readRecords(root, issue), v.green)) !== JSON.stringify(record)) fail(`gate: the confirm run of ${o.id} does not match the green (fixtures, image or an explored volume)`);
+      say(`gate: ${o.id} passed and confirmed; the confirm run is recorded in ${runsFile(root, issue)}: commit it`);
       break;
     }
     case 'postmortem':
     case 'runbook': {
       const records = readRecords(root, issue);
-      const v = verdict(root, o.id, records);
+      const v = verdict(root, o.id, issue, records);
       if (!v.ok) fail(`${cmd}: the gate refuses ${o.id}:\n  ${v.reasons.join('\n  ')}`);
       const confirm = confirmOf(records, v.green);
-      if (!confirm) fail(`${cmd}: the green of ${o.id} is not confirmed; run bin/check gate ${o.id}`);
+      if (!confirm) fail(`${cmd}: the green of ${o.id} has no passing latest confirm run; run bin/check gate ${o.id}`);
       say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm)}`);
       break;
     }

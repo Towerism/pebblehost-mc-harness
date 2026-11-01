@@ -17,6 +17,12 @@ rec() {
   node -e 'const l = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n"); console.log(JSON.parse(l[process.argv[2]])[process.argv[3]])' "$MC_HOME/.verify/runs/issue-7.jsonl" "$1" "$2"
 }
 
+# The gate counts only records committed at HEAD (G10).
+commit_records() {
+  git -C "$MC_HOME" add .verify
+  git -C "$MC_HOME" commit -q -m 'run records'
+}
+
 label() {
   docker inspect --format "{{index .Config.Labels \"mc-harness.$1\"}}" "$SERVER"
 }
@@ -85,19 +91,38 @@ EOF
   run check run 7-difficulty
   [ "$status" -eq 0 ]
   [ "$(rec 2 commit)" = "$(rec 0 commit)" ]
+  commit_records
   run check gate 7-difficulty
   echo "$output"
   [ "$status" -eq 2 ]
   [[ $output == *"G3: the green booted "*"not a strict descendant"* ]]
 }
 
+@test "a no-op server commit, a rebuild and a repair on the console: the explored green is refused" {
+  echo '# no-op' >>"$MC_HOME/server/server.properties"
+  git -C "$MC_HOME" commit -q -am 'no-op server change'
+  run dev rebuild
+  [ "$status" -eq 0 ]
+  run dev console difficulty normal
+  [ "$status" -eq 0 ]
+  run check run 7-difficulty
+  [ "$status" -eq 0 ]
+  [ "$(rec 3 explored)" = true ]
+  commit_records
+  run check gate 7-difficulty
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [[ $output == *"G9: the green's volume "*" was explored"* ]]
+}
+
 @test "a fix commit counts only once rebuilt; then the gate passes, confirms, and allows the docs" {
   booted=$(git -C "$MC_HOME" rev-parse HEAD)
+  red=$(rec 0 commit)
   sed -i 's/^difficulty=easy$/difficulty=normal/' "$MC_HOME/server/server.properties"
   git -C "$MC_HOME" commit -q -am 'fix: normal difficulty'
   # Not rebuilt yet: the pod still reports the booted commit.
   run check run 7-difficulty
-  [ "$(rec 3 commit)" = "$booted" ]
+  [ "$(rec 4 commit)" = "$booted" ]
   run check postmortem 7-difficulty
   [ "$status" -eq 2 ]
   [[ $output == *"the gate refuses 7-difficulty"* ]]
@@ -105,19 +130,25 @@ EOF
   [ "$status" -eq 0 ]
   run check run 7-difficulty
   [ "$status" -eq 0 ]
-  [ "$(rec 4 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
-  [ "$(rec 4 generation)" != "$(rec 0 generation)" ]
+  [ "$(rec 5 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
+  [ "$(rec 5 explored)" = false ]
+  [ "$(rec 5 generation)" != "$(rec 0 generation)" ]
+  # The records must be committed before the gate counts them.
+  run check gate 7-difficulty
+  [ "$status" -eq 2 ]
+  [[ $output == *"G10: the green record is not committed"* ]]
+  commit_records
   run check gate 7-difficulty
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *"gate: 7-difficulty passed and confirmed"* ]]
-  [ "$(rec 5 confirm)" = true ]
-  [ "$(rec 5 pass)" = true ]
+  [ "$(rec 6 confirm)" = true ]
+  [ "$(rec 6 pass)" = true ]
   run check postmortem 7-difficulty
   [ "$status" -eq 0 ]
   pm=$(ls "$MC_HOME"/docs/postmortems/*-7-difficulty.md)
-  grep -q "failed on commit \`$booted\`" "$pm"
-  grep -q 'server.properties' "$pm"
+  grep -q "failed on commit \`$red\`" "$pm"
+  grep -q '^+difficulty=normal' "$pm"
   run check runbook 7-difficulty
   [ "$status" -eq 0 ]
   grep -q 'bin/check run 7-difficulty --target live --issue 7' "$MC_HOME"/docs/runbooks/*-7-difficulty.md
@@ -126,6 +157,7 @@ EOF
 @test "a red on an explored volume never counts, even with a valid green later" {
   ISSUE=8 run check run 7-difficulty
   [ "$status" -eq 0 ]
+  commit_records
   ISSUE=8 run check gate 7-difficulty
   echo "$output"
   [ "$status" -eq 2 ]

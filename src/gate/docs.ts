@@ -7,12 +7,6 @@ import { fail } from '../dev/docker.ts';
 import { git, HARNESS_ROOT } from '../dev/image.ts';
 import type { RunRecord } from '../check/record.ts';
 
-// The pass of a confirm run of this green, made after it by bin/check gate.
-export function confirmOf(records: RunRecord[], green: RunRecord): RunRecord | undefined {
-  const after = records.slice(records.indexOf(green) + 1);
-  return after.find((r) => r.confirm && r.pass && r.check === green.check && r.checkHash === green.checkHash && r.imageHash === green.imageHash && r.treeHash === green.treeHash);
-}
-
 export function render(template: string, values: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, k: string) => {
     if (!(k in values)) fail(`template field {{${k}}} has no value`);
@@ -21,6 +15,14 @@ export function render(template: string, values: Record<string, string>): string
 }
 
 const json = ({ output: _, ...rest }: RunRecord) => JSON.stringify(rest, null, 2);
+
+const PATCH_LINES = 400;
+
+// The server/ diff of the fix, for the postmortem's review section.
+function serverPatch(root: string, red: string, green: string): string {
+  const lines = mustGit(root, ['diff', '--no-color', red, green, '--', 'server/']).split('\n');
+  return lines.length <= PATCH_LINES ? lines.join('\n') : `${lines.slice(0, PATCH_LINES).join('\n')}\n... ${lines.length - PATCH_LINES} more lines: git diff ${red.slice(0, 12)} ${green.slice(0, 12)} -- server/`;
+}
 
 function mustGit(root: string, args: string[]): string {
   const r = git(root, args);
@@ -56,7 +58,7 @@ export function writeDoc(root: string, kind: 'postmortem' | 'runbook', red: RunR
     redCommit: red.commit,
     greenCommit: green.commit,
     ...(kind === 'postmortem'
-      ? { serverDiff: mustGit(root, ['diff', '--stat', red.commit, green.commit, '--', 'server/']), red: json(red), green: json(green), confirm: json(confirm), redOutput: red.output }
+      ? { serverDiff: mustGit(root, ['diff', '--stat', red.commit, green.commit, '--', 'server/']), serverPatch: serverPatch(root, red.commit, green.commit), red: json(red), green: json(green), confirm: json(confirm), redOutput: red.output }
       : { base, files: pushList(root, base) }),
   };
   mkdirSync(dir, { recursive: true });

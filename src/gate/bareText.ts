@@ -50,10 +50,17 @@ export function literalProblems(literal: string): string[] {
 }
 
 export function bareTextProblems(src: string): string[] {
+  return parseBareText(src).problems;
+}
+
+// The problems, and the server files the bareText() calls read (G4 needs the
+// fix to touch each of them).
+export function parseBareText(src: string): { problems: string[]; files: string[] } {
   const toks = tokenize(src);
-  if (typeof toks === 'string') return [toks];
+  if (typeof toks === 'string') return { problems: [`not a bare-text check: ${toks}`], files: [] };
   let i = 0;
   const problems: string[] = [];
+  const files: string[] = [];
   const peek = () => toks[i];
   const expect = (value: string | null, kind: Tok['kind'] = 'punct'): Tok => {
     const t = toks[i];
@@ -69,6 +76,7 @@ export function bareTextProblems(src: string): string[] {
     expect('(');
     const args = [expect(null, 'str'), (expect(','), expect(null, 'str')), (expect(','), expect(null, 'str'))];
     expect(')');
+    files.push(args[0].value);
     problems.push(...literalProblems(args[2].value));
   };
   try {
@@ -108,7 +116,7 @@ export function bareTextProblems(src: string): string[] {
     }
     if (tests === 0) throw new Error('no test(...)');
   } catch (e) {
-    return [`not a bare-text check: ${(e as Error).message}`];
+    return { problems: [`not a bare-text check: ${(e as Error).message}`], files };
   }
-  return problems;
+  return { problems, files: [...new Set(files)] };
 }
