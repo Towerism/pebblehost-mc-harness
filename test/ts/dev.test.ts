@@ -239,6 +239,9 @@ test('build labels an archive image with its commit and source=archive', () => {
   assert.equal(built.id.commit.length, 40);
   for (const k of ['commit', 'tree', 'harness', 'image'] as const) assert.ok(args.includes(`mc-harness.${k}=${built.id[k]}`), k);
   assert.ok(args.includes('mc-harness.project=proj1234'));
+  // Another checkout with the same tree gets its own tag, never this image.
+  assert.equal(built.tag, `mc-dev:proj1234-${built.id.image}`);
+  assert.equal(build(source(root), recorder({ 'image inspect': { status: 1 } }).d, 'other123').tag, `mc-dev:other123-${built.id.image}`);
 });
 
 test('build labels a plain-copy image source=dir with an empty commit and a dir: tree', () => {

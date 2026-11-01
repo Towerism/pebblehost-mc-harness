@@ -10,7 +10,7 @@ import { bootTimeout, createJoin, createPod, formatBootReport, mergeFixtures, na
 const USAGE = `usage: dev <command> [--pod ID] [options]
 
   up [--fixtures DIR]... [--jar NAME] [--heap SIZE]
-                          build mc-dev:<imageHash> from the committed server/
+                          build mc-dev:<project>-<imageHash> from the committed server/
                           and boot the pod; refuses uncommitted server/ changes
   rebuild [same options]  rebuild from HEAD, then recreate container and volume
   restart                 restart the container on the same image; state kept
