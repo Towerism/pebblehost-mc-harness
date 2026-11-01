@@ -177,6 +177,11 @@ EOF
   [[ $output == *"gate: 7-difficulty passed and confirmed"* ]]
   [ "$(rec 8 confirm)" = true ]
   [ "$(rec 8 pass)" = true ]
+  # The docs need the confirm record committed too.
+  run check postmortem 7-difficulty
+  [ "$status" -eq 2 ]
+  [[ $output == *"the confirm record of 7-difficulty is not committed"* ]]
+  commit_records
   run check postmortem 7-difficulty
   [ "$status" -eq 0 ]
   pm=$(ls "$MC_HOME"/docs/postmortems/*-7-difficulty.md)
