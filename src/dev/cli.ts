@@ -5,7 +5,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail, must } from './docker.ts';
 import { build, buildRelay, chooseJar, dirtyHarness, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
-import { bootTimeout, createJoin, createPod, formatBootReport, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
+import { bootTimeout, createJoin, createPod, formatBootReport, killOrphanSuite, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
 
 const USAGE = `usage: dev <command> [--pod ID] [options]
 
@@ -162,6 +162,7 @@ function main(argv: string[]) {
       break;
     }
     case 'down':
+      if (o.all && killOrphanSuite(p.root)) say('down: stopped an orphaned bin/check suite run');
       say(`down: removed ${removePod(p, o.all, d)} resource(s)`);
       break;
     case 'status': {

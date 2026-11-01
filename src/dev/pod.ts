@@ -160,6 +160,37 @@ export function isExplored(p: Pod, d: Docker): boolean {
   return d(['exec', names(p).server, 'test', '-e', EXPLORED]).status === 0;
 }
 
+// bin/check suite runs the suite in a detached child (its own process
+// group) and records the group here, so a later suite or bin/dev down --all
+// can stop one whose parent died (SIGKILL) and left it running.
+export function suitePidFile(root: string): string {
+  return join(root, '.dev', 'suite.pid');
+}
+
+// Kill the recorded suite child's process group, if it is still that child:
+// /proc/<pid>/environ must hold MC_SUITE_CHILD=1 and this project's MC_HOME,
+// so a reused pid is never touched. Returns whether it killed one.
+export function killOrphanSuite(root: string): boolean {
+  const f = suitePidFile(root);
+  if (!existsSync(f)) return false;
+  const pid = Number(readFileSync(f, 'utf8').trim());
+  rmSync(f, { force: true });
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  let env: string[];
+  try {
+    env = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+  } catch {
+    return false;
+  }
+  if (!env.includes('MC_SUITE_CHILD=1') || !env.includes(`MC_HOME=${root}`)) return false;
+  try {
+    process.kill(-pid, 'SIGKILL');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Restart the server container on its volume and wait for "Done"; with
 // reset, drop the seeded marker first so /fixtures is applied again.
 // Returns the boot's "Done" seconds.

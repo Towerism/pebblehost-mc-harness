@@ -6,8 +6,13 @@ import assert from 'node:assert/strict';
 import { dev } from '../../src/check/dev.ts';
 import { isData, readProfile, type Profile } from '../../src/check/profile.ts';
 import { checkEnv } from '../../src/check/run.ts';
-import { planSuite, type SuiteCheck } from '../../src/check/suite.ts';
+import { planSuite, teardownSuitePods, type SuiteCheck } from '../../src/check/suite.ts';
+import type { Docker } from '../../src/dev/docker.ts';
+import { killOrphanSuite, podOf, suitePidFile } from '../../src/dev/pod.ts';
+import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { formatTimings, readBudget, type Timings } from '../../src/check/timings.ts';
+import { join } from 'node:path';
 import { check, project, tmp, write } from './project.ts';
 
 const P = (o: Partial<Profile> = {}): Profile => ({ kind: 'e2e', fixtures: [], data: [], needs: [], restart: false, exclusive: false, ...o });
@@ -122,4 +127,38 @@ test('one check that cannot run is refused alone; the rest of the suite runs and
   assert.match(r.stdout, /^PASS 3-crate/m);
   assert.match(r.stdout, /^refused 3-bad +fixture conflict/m);
   assert.match(r.stdout, /suite: 2 check\(s\), 1 failed or refused \(3-bad\); 0 pod\(s\)/);
+});
+
+test('teardownSuitePods removes the suite<N> pods of this project by label and nothing else', () => {
+  const root = tmp();
+  const calls: string[][] = [];
+  const d: Docker = (args) => {
+    calls.push(args);
+    const out = args.includes('--format') ? 'suite0\ndev\nsuite12\n\n' : args[0] === 'ps' || args.includes('-q') ? 'x1\n' : '';
+    return { status: 0, stdout: out, stderr: '' };
+  };
+  assert.equal(teardownSuitePods(root, d), 6);
+  const project = podOf(root, 'dev').project;
+  const filters = calls.filter((c) => c.includes('-q')).map((c) => c[c.length - 1]);
+  assert.deepEqual([...new Set(filters)].sort(), ['label=mc-harness.pod=suite0', 'label=mc-harness.pod=suite12']);
+  assert.ok(calls.every((c) => !c.includes('-q') || c.includes(`label=mc-harness.project=${project}`)));
+});
+
+test('killOrphanSuite kills the group of the recorded suite child only when /proc shows it is that child', async () => {
+  const root = realpathSync(tmp());
+  write(root, { '.dev/.keep': '' });
+  const start = (env: Record<string, string>) => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', env: { PATH: process.env.PATH ?? '', ...env } });
+  const exited = (c: ReturnType<typeof start>) => new Promise((r) => c.on('exit', (_, sig) => r(sig)));
+  const orphan = start({ MC_SUITE_CHILD: '1', MC_HOME: root });
+  const other = start({ MC_HOME: root });
+  await new Promise((r) => setTimeout(r, 100));
+  write(root, { '.dev/suite.pid': `${other.pid}\n` });
+  assert.equal(killOrphanSuite(root), false, 'a process that is not a suite child is left alone');
+  write(root, { '.dev/suite.pid': `${orphan.pid}\n` });
+  assert.equal(killOrphanSuite(root), true);
+  assert.equal(await exited(orphan), 'SIGKILL');
+  assert.equal(killOrphanSuite(root), false, 'the pidfile is gone');
+  assert.equal(suitePidFile(root), join(root, '.dev', 'suite.pid'));
+  other.kill('SIGKILL');
+  await exited(other);
 });
