@@ -20,6 +20,11 @@ export type Profile = { kind: Kind; fixtures: string[]; data: string[]; needs: N
 const KEYS = ['kind', 'fixtures', 'data', 'needs', 'restart', 'exclusive', 'sqlite'];
 const strings = (v: unknown) => Array.isArray(v) && v.every((s) => typeof s === 'string');
 const relative = (s: string) => s !== '' && !s.startsWith('/') && !s.split('/').includes('..');
+// sqlite paths in one spelling only, so two keys can't name one file and a
+// key can't alias a fixture file: no '', '.' or '..' segment, no control
+// characters (shown escaped in the refusal).
+const canonical = (s: string) => s.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..') && !/[\x00-\x1f\x7f]/.test(s);
+const shown = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 export function readProfile(root: string, id: string): Profile {
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(id)) fail(`bad check id ${id}`);
@@ -42,8 +47,8 @@ export function readProfile(root: string, id: string): Profile {
   if (typeof p.restart !== 'boolean' || typeof p.exclusive !== 'boolean') bad('restart and exclusive must be true or false');
   if (typeof p.sqlite !== 'object' || p.sqlite === null || Array.isArray(p.sqlite) || !Object.values(p.sqlite).every((v) => typeof v === 'string')) bad('sqlite must map database paths to SQL files');
   for (const [k, v] of Object.entries(p.sqlite)) {
-    if (!relative(k) || !/\.(db|sqlite3?)$/i.test(k)) bad(`sqlite key ${k} must be a server path relative to the root ending .db, .sqlite or .sqlite3`);
-    if (!relative(v)) bad(`sqlite value ${v} must be a path relative to the check`);
+    if (!canonical(k) || !/\.(db|sqlite3?)$/i.test(k)) bad(`sqlite key ${shown(k)} must be a server path relative to the root ending .db, .sqlite or .sqlite3`);
+    if (!canonical(v)) bad(`sqlite value ${shown(v)} must be a path relative to the check`);
   }
   if (p.kind === 'bare-text' && (p.fixtures.length || p.data.length || p.needs.length || p.restart || p.exclusive || Object.keys(p.sqlite).length)) bad('a bare-text check takes no fixtures, data, needs, restart, exclusive or sqlite');
   return p;

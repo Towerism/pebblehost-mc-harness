@@ -46,6 +46,8 @@ test('readProfile: sqlite maps server database paths to SQL files in the check',
   assert.deepEqual(sqliteFixtures(root, 'a', p), { 'plugins/E/data.db': join(root, 'checks/a/economy.sql'), 'x.sqlite3': join(root, 'checks/a/sql/x.sql') });
   write(root, { 'checks/c/profile.json': '{"kind":"e2e","sqlite":{"d.db":"missing.sql"}}' });
   assert.throws(() => sqliteFixtures(root, 'c', readProfile(root, 'c')), /sqlite missing\.sql is not a file in the check/);
+  write(root, { 'checks/c/profile.json': '{"kind":"e2e","sqlite":{"d.db":"sql"}}', 'checks/c/sql/x.sql': '' });
+  assert.throws(() => sqliteFixtures(root, 'c', readProfile(root, 'c')), /sqlite sql is not a file in the check/);
   const bad: [string, RegExp][] = [
     ['{"kind":"e2e","sqlite":["a.db"]}', /sqlite must map database paths to SQL files/],
     ['{"kind":"e2e","sqlite":{"a.db":1}}', /sqlite must map database paths to SQL files/],
@@ -54,6 +56,14 @@ test('readProfile: sqlite maps server database paths to SQL files in the check',
     ['{"kind":"e2e","sqlite":{"plugins/E/data.yml":"a.sql"}}', /sqlite key plugins\/E\/data\.yml must be/],
     ['{"kind":"e2e","sqlite":{"a.db":"../a.sql"}}', /sqlite value \.\.\/a\.sql must be a path relative to the check/],
     ['{"kind":"e2e","sqlite":{"a.db":""}}', /sqlite value  must be a path relative to the check/],
+    ['{"kind":"e2e","sqlite":{"./x.db":"a.sql"}}', /sqlite key \.\/x\.db must be/],
+    ['{"kind":"e2e","sqlite":{"plugins/E/./keep.db":"a.sql"}}', /sqlite key plugins\/E\/\.\/keep\.db must be/],
+    ['{"kind":"e2e","sqlite":{"plugins//keep.db":"a.sql"}}', /sqlite key plugins\/\/keep\.db must be/],
+    ['{"kind":"e2e","sqlite":{"a\\nb.db":"a.sql"}}', /sqlite key a\\u000ab\.db must be/],
+    ['{"kind":"e2e","sqlite":{"a.db":"./a.sql"}}', /sqlite value \.\/a\.sql must be/],
+    ['{"kind":"e2e","sqlite":{"a.db":"sql//a.sql"}}', /sqlite value sql\/\/a\.sql must be/],
+    ['{"kind":"e2e","sqlite":{"a.db":"sql/"}}', /sqlite value sql\/ must be/],
+    ['{"kind":"e2e","sqlite":{"a.db":"a\\u0007.sql"}}', /sqlite value a\\u0007\.sql must be/],
     ['{"kind":"bare-text","sqlite":{"a.db":"a.sql"}}', /a bare-text check takes no fixtures, data, needs, restart, exclusive or sqlite/],
   ];
   for (const [json, re] of bad) {
