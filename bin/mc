@@ -5,22 +5,30 @@ set -euo pipefail
 
 home=${MC_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 
-# The main checkout when $home is a linked git worktree, else nothing.
+# The main checkout when $home is the top of a linked git worktree, else nothing.
+# A bare main repo has no checkout to share, so it counts as nothing.
 main_checkout() {
-  local dir common
+  local top dir common list
+  # An inherited GIT_DIR (git hooks export it) would override -C.
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
+  top=$(git -C "$home" rev-parse --show-toplevel 2>/dev/null) || return 0
+  [[ $top == "$(cd "$home" && pwd -P)" ]] || return 0
   dir=$(git -C "$home" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 0
-  common=$(git -C "$home" rev-parse --path-format=absolute --git-common-dir) || return 0
-  [[ $dir != "$common" ]] || return 0
-  git -C "$home" worktree list --porcelain | sed -n '1s/^worktree //p'
+  common=$(git -C "$home" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  [[ $dir == /* && $dir != "$common" ]] || return 0
+  list=$(git -C "$home" worktree list --porcelain 2>/dev/null) || return 0
+  # The first block is the main worktree: "worktree <path>", then "bare" when it is bare.
+  awk 'NR == 1 { sub(/^worktree /, ""); path = $0; next } /^$/ { exit } $0 == "bare" { bare = 1 }
+    END { if (!bare) print path }' <<<"$list"
 }
 
 # A worktree shares .env and backups/ with the main checkout, so backups outlive it.
 # server/ and .mc/ stay in the worktree, where edits are made.
-main=$(! command -v git >/dev/null || main_checkout)
+main_dir=$(! command -v git >/dev/null || main_checkout)
 env_file=${MC_ENV_FILE:-$home/.env}
-[[ -n ${MC_ENV_FILE:-} || -f $env_file || -z $main ]] || env_file=$main/.env
+[[ -n ${MC_ENV_FILE:-} || -f $env_file || -z $main_dir ]] || env_file=$main_dir/.env
 mirror=$home/server
-backups=${main:-$home}/backups
+backups=${main_dir:-$home}/backups
 state=$home/.mc
 export TZ=UTC
 
@@ -119,7 +127,9 @@ local_manifest() { find "$mirror/$1" -type f -print0 2>/dev/null | sort -z | xar
 # A path for messages: relative inside $home, absolute elsewhere (the main checkout's backups/).
 show() { printf '%s' "${1#"$home"/}"; }
 
-new_backup() { mkdir -p "$backups" && mktemp -d "$backups/$(date +%Y%m%d-%H%M%S)-XXXX"; }
+new_backup() {
+  { mkdir -p "$backups" && mktemp -d "$backups/$(date +%Y%m%d-%H%M%S)-XXXX"; } 2>/dev/null || die "cannot create a backup in $(show "$backups")"
+}
 
 cmd_ls() {
   ((long)) || { rclone lsf "$(remote "$1")"; return; }
@@ -167,7 +177,7 @@ cmd_push() {
   [[ -f $snap ]] || die "no pull recorded for '$p'; pull it first"
   snapshot "$p" >"$tmp/snapshot"
   diff -q "$snap" "$tmp/snapshot" >/dev/null ||
-    die "remote '$p' changed since the last pull; pull again (your edits are kept in backups/) and redo them"
+    die "remote '$p' changed since the last pull; pull again (it moves your edits to $(show "$backups")/<ts>/local/) and redo them"
   backup=$(new_backup)
   rclone copyto "$(remote "$p")" "$backup/remote/$p"
   # --inplace: PebbleHost's SFTP refuses renaming rclone's .partial upload over the target.
@@ -193,10 +203,12 @@ main() {
     esac
   done
   [[ $path == . ]] && path=""
-  [[ $long == 0 || $cmd == ls ]] || die "-l works only with ls"
   case $cmd in
     ls) ;;
-    pull | diff | push) [[ -n $path || $all == 1 ]] || die "$cmd on the server root needs --all" ;;
+    pull | diff | push)
+      [[ $long == 0 ]] || die "-l works only with ls"
+      [[ -n $path || $all == 1 ]] || die "$cmd on the server root needs --all"
+      ;;
     -h | --help | help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
