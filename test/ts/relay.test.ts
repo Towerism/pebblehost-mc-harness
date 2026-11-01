@@ -156,6 +156,23 @@ test('serve answers one JSON line per connection: a newline or EOF ends the requ
   await new Promise((r) => server.close(r));
 });
 
+test('serve drops a client that never finishes its request, with an error reply, and keeps serving', async () => {
+  const path = join(tmp(), 'relay.sock');
+  const server = await serve(path, { echo: async (req) => ({ got: req.v }) }, 100);
+  const t0 = Date.now();
+  const stalled = await new Promise<string>((resolve) => {
+    let out = '';
+    const c = createConnection(path, () => c.write('{"op":"echo"'));
+    c.setEncoding('utf8');
+    c.on('data', (s) => (out += s));
+    c.on('close', () => resolve(out));
+  });
+  assert.equal(stalled, '{"ok":false,"error":"no complete request within 100ms"}\n');
+  assert.ok(Date.now() - t0 < 2000);
+  assert.equal(await ask(path, '{"op":"echo","v":2}\n'), '{"ok":true,"got":2}\n');
+  await new Promise((r) => server.close(r));
+});
+
 function run(cmd: string, args: string[], env: Record<string, string>, input: string): Promise<{ status: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const c = spawn(cmd, args, { env: { ...process.env, ...env } });
