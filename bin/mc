@@ -134,7 +134,8 @@ state_file() { printf '%s/%s/%s' "$state" "$1" "$(printf '%s' "$2" | sha1sum | c
 snapshot() { rclone lsf -R --files-only --format pst --separator '|' "${filter[@]}" "$(remote "$1")" | sort; }
 
 # Checksums of the local mirror under $1, to tell unpushed edits from a clean pull.
-local_manifest() { find "$mirror/$1" -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha1sum; }
+# A path the pull found empty has no local copy: an empty manifest, not an error.
+local_manifest() { { find "$mirror/$1" -type f -print0 2>/dev/null || true; } | sort -z | xargs -0 -r sha1sum; }
 
 # A path for messages: relative inside $home, absolute elsewhere (the main checkout's backups/).
 show() { printf '%s' "${1#"$home"/}"; }
@@ -180,6 +181,8 @@ cmd_diff() {
   local p=$1 rc=0
   [[ -e $mirror/$p ]] || die "server/$p not found; pull it first"
   rclone copyto "${filter[@]}" "$(remote "$p")" "$tmp/remote/$p" || die "could not download '$p'"
+  # A directory whose remote side is empty (or all excluded) downloads as nothing.
+  [[ -d $mirror/$p && ! -e $tmp/remote/$p ]] && mkdir -p "$tmp/remote/$p"
   diff -ruN "$tmp/remote/$p" "$mirror/$p" | sed -e "s#$tmp/remote/#remote/#" -e "s#$mirror/#server/#" || rc=$?
   return "$rc"
 }
