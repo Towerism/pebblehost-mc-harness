@@ -10,9 +10,9 @@ bats suites for `bin/mc` and the path-guard hooks, plus `node --test` unit tests
 | Directory | Purpose |
 |-----------|---------|
 | `unit/` | Fast tests against a fake rclone, and `guard.bats` for the hooks in a temp git repo (see `unit/AGENTS.md`) |
-| `ts/` | `*.test.ts` run by `node --test` in `make test-unit`; `guard.test.ts` covers every guard rule and the cap boundary; `dev.test.ts` covers `src/dev/` with a recording fake docker; `relay.test.ts` covers `src/relay/` against an in-process fake RCON server, and `bin/dev console` with a fake docker |
+| `ts/` | `*.test.ts` run by `node --test` in `make test-unit`; `guard.test.ts` covers every guard rule and the cap boundary; `dev.test.ts` covers `src/dev/` with a recording fake docker; `check.test.ts` covers `bin/check run` in a temp project that maps `#harness/*` to this checkout, with a fake docker; `relay.test.ts` covers `src/relay/` against an in-process fake RCON server, and `bin/dev console` with a fake docker |
 | `integration/` | End-to-end tests against a shared `atmoz/sftp` container (see `integration/AGENTS.md`) |
-| `dev/` | `make test-dev`: `bin/dev` against Docker and vanilla Purpur 26.1.2. `prime` downloads it and lets paperclip fetch its libraries once into `~/.cache/mc-harness/`; `setup_suite.bash` commits it as `server/` in a temp project; `dev.bats` tests share one pod in file order; `egress-probe` runs inside the container; `budget.json` is the vanilla boot baseline |
+| `dev/` | `make test-dev`: `bin/dev` against Docker and vanilla Purpur 26.1.2. `prime` downloads it and lets paperclip fetch its libraries once into `~/.cache/mc-harness/`; `setup_suite.bash` commits it as `server/` in a temp project; `dev.bats` tests share one pod in file order; `verify.bats` runs after it: `bin/check run` red on a fresh volume, explored marking, green only after a fix commit and `rebuild`; `egress-probe` runs inside the container; `budget.json` is the vanilla boot baseline |
 | `live/` | Opt-in read-only smoke test against the real server (see `live/AGENTS.md`) |
 
 ## For AI Agents
