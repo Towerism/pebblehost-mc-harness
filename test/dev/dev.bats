@@ -87,7 +87,9 @@ label() {
   [ "$output" = "$RELAY_LIST" ]
   run dev console say hello from the relay
   [ "$status" -eq 0 ]
-  docker logs "$SERVER" 2>&1 | grep -q 'hello from the relay'
+  # The broadcast reaches the log a moment after the reply; no grep -q, whose
+  # early exit would kill docker logs with SIGPIPE.
+  timeout 10 bash -c 'until docker logs "$1" 2>&1 | grep "hello from the relay" >/dev/null; do sleep 0.5; done' _ "$SERVER"
   # The client exits after each call; the daemon and its one RCON connection stay.
   [ "$(docker inspect --format '{{.State.Status}} {{.State.StartedAt}}' "$relay")" = "running $started" ]
   [ "$(docker exec "$SERVER" sh -c 'grep -c "RCON Client .* started" /server/logs/latest.log')" -eq 1 ]
