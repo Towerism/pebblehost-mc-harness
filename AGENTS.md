@@ -70,7 +70,7 @@ Created at runtime and git-ignored: `server/` (local mirror of pulled server fil
 ### External
 - `rclone`: SFTP transfers and listings
 - `bats` (with GNU `parallel` for `--jobs`): test runner; `shellcheck`: lint
-- Node 24 or later; `typescript` and `@types/node`, exact-pinned dev dependencies
+- Node 24.12 or later (node:sqlite's `enableDefensive`); `typescript` and `@types/node`, exact-pinned dev dependencies
 - Docker with the `atmoz/sftp:alpine` image: integration tests
 - Docker with `eclipse-temurin:25-jre` and `alpine/socat` (both pinned by digest): `bin/dev` and the dev tier. Without the buildx plugin, `docker build` uses the classic builder; both cache the jar layer.
 

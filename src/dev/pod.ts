@@ -137,7 +137,7 @@ function buildFixtures(sources: string[], dest: string, sqlite: Record<string, s
       mkdirSync(dirname(join(dest, target)), { recursive: true });
       const db = new DatabaseSync(join(dest, target));
       try {
-        if (typeof db.setAuthorizer !== 'function' || typeof db.enableDefensive !== 'function') fail(`Node ${process.version}'s node:sqlite has no setAuthorizer or enableDefensive; sqlite fixtures need a newer Node 24`);
+        if (typeof db.setAuthorizer !== 'function' || typeof db.enableDefensive !== 'function') fail(`Node ${process.version}'s node:sqlite has no setAuthorizer or enableDefensive; sqlite fixtures need Node 24.12 or later`);
         db.enableDefensive(true);
         db.setAuthorizer(noAttach);
         db.exec(text.toString('utf8'));
