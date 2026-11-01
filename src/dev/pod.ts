@@ -1,5 +1,6 @@
 // A pod: one server container on its own internal network (no gateway, so no
-// egress), a named volume at /server and a read-only /fixtures. Everything
+// egress), a named volume at /server and a read-only /fixtures, plus the relay
+// container (src/relay/) on that network only, which holds the RCON connection. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -61,7 +62,7 @@ export function podOf(root: string, pod: string): Pod {
 
 export function names(p: Pod) {
   const prefix = `mc-${p.project}-${p.pod}`;
-  return { net: `${prefix}-net`, vol: `${prefix}-server`, server: `${prefix}-server`, join: `${prefix}-join`, joinNet: `${prefix}-joinnet`, dir: join(p.root, '.dev', 'pods', p.pod) };
+  return { net: `${prefix}-net`, vol: `${prefix}-server`, server: `${prefix}-server`, relay: `${prefix}-relay`, join: `${prefix}-join`, joinNet: `${prefix}-joinnet`, dir: join(p.root, '.dev', 'pods', p.pod) };
 }
 
 function labelArgs(p: Pod): string[] {
@@ -89,10 +90,10 @@ export function mergeFixtures(sources: string[], dest: string): string {
   return dirHash(dest);
 }
 
-export type Spec = { tag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string; memory?: string };
+export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string; memory?: string };
 
-// Network, volume and container. No published port: bin/dev join adds a proxy.
-// The RCON password reaches docker through its environment, never argv.
+// Network, volume, server and relay. No published port: bin/dev join adds a
+// proxy. The RCON password reaches docker through its environment, never argv.
 export function createPod(p: Pod, s: Spec, d: Docker): void {
   const n = names(p);
   must(d, ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labelArgs(p), n.net]);
@@ -105,6 +106,10 @@ export function createPod(p: Pod, s: Spec, d: Docker): void {
   if (s.memory) run.push('--memory', s.memory);
   run.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '4096', '--stop-timeout', '60', s.tag);
   must(d, run, { RCON_PASSWORD: s.rconPassword });
+  const relay = ['run', '-d', '--name', n.relay, '--hostname', `relay-${p.pod}`, '--network', n.net, ...labelArgs(p), '--init'];
+  relay.push('-e', 'RCON_PASSWORD', '-e', `RCON_HOST=${n.server}`, '--user', '1000:1000', '--read-only', '--tmpfs', '/run:rw,nosuid,nodev,noexec,size=1m,uid=1000,gid=1000,mode=0700');
+  relay.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256', s.relayTag);
+  must(d, relay, { RCON_PASSWORD: s.rconPassword });
 }
 
 // A socat proxy publishing 127.0.0.1:port to the server: on its own labelled

@@ -11,6 +11,8 @@ import { applyOverrides } from './overrides.ts';
 export const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
 // What the harness puts into an image besides the server tree.
 export const HARNESS_INPUTS = ['docker/server.Dockerfile', 'docker/entrypoint.sh', 'src/dev/overrides.ts'];
+// What goes into the relay image; their hash is its tag.
+export const RELAY_INPUTS = ['docker/relay.Dockerfile', 'src/relay/daemon.ts', 'src/relay/client.ts', 'src/relay/rcon.ts'];
 
 export type Source = { kind: 'git'; root: string; commit: string } | { kind: 'dir'; root: string };
 // source=archive images come from a commit; source=dir images from a plain
@@ -189,6 +191,27 @@ export function build(src: Source, d: Docker, project: string, harnessRoot = HAR
   }
 }
 
+// The relay image, mc-relay:<hash of RELAY_INPUTS>, built once per change to
+// them. It holds no server files.
+export function buildRelay(d: Docker, project: string, root: string, harnessRoot = HARNESS_ROOT): string {
+  const h = createHash('sha256');
+  for (const f of RELAY_INPUTS) h.update(`${f}\n${sha256(readFileSync(join(harnessRoot, f)))}\n`);
+  const tag = `mc-relay:${h.digest('hex')}`;
+  if (d(['image', 'inspect', tag]).status === 0) return tag;
+  const ctx = mkdtempSync(join(privateDir(join(root, '.dev')), 'relay-'));
+  try {
+    mkdirSync(join(ctx, 'relay'));
+    for (const f of RELAY_INPUTS.slice(1)) cpSync(join(harnessRoot, f), join(ctx, 'relay', f.split('/').pop() as string));
+    writeFileSync(join(ctx, 'relay', 'package.json'), '{"type":"module"}\n');
+    cpSync(join(harnessRoot, RELAY_INPUTS[0]), join(ctx, 'Dockerfile'));
+    const r = d(['build', '-f', join(ctx, 'Dockerfile'), '-t', tag, '--label', `mc-harness.project=${project}`, ctx]);
+    if (r.status !== 0) fail(`docker build of the relay failed:\n${(r.stdout + r.stderr).split('\n').slice(-30).join('\n')}`);
+    return tag;
+  } finally {
+    rmSync(ctx, { recursive: true, force: true });
+  }
+}
+
 // Every file in the context's ovr/ must be byte-equal in the built image;
 // otherwise the image is removed and the build fails. Returns the count.
 export function verifyOverrides(d: Docker, tag: string, ovr: string): number {
@@ -212,14 +235,15 @@ export function privateDir(dir: string): string {
   return dir;
 }
 
-// Remove the project's mc-dev images except `keep` and those a container
-// still uses: they hold server configs and secrets. Returns how many went.
+// Remove the project's mc-dev and mc-relay images except `keep` and those a
+// container still uses: mc-dev ones hold server configs and secrets. Returns
+// how many went.
 export function pruneImages(d: Docker, project: string, keep: string[]): number {
   const used = new Set(must(d, ['ps', '-a', '--filter', `label=mc-harness.project=${project}`, '--format', '{{.Image}}']).split('\n').filter(Boolean));
   const imgs = must(d, ['image', 'ls', '--filter', `label=mc-harness.project=${project}`, '--format', '{{.Repository}}:{{.Tag}} {{.ID}}']).split('\n').filter(Boolean);
   const gone = imgs.filter((l) => {
     const [ref, id] = l.split(' ');
-    return ref.startsWith('mc-dev:') && !keep.includes(ref) && !used.has(ref) && !used.has(id);
+    return /^mc-(dev|relay):/.test(ref) && !keep.includes(ref) && !used.has(ref) && !used.has(id);
   });
   if (gone.length > 0) must(d, ['image', 'rm', '-f', ...gone.map((l) => l.split(' ')[0])]);
   return gone.length;

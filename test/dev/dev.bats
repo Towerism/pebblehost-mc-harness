@@ -8,6 +8,8 @@ dev() {
   timeout 300 "$DEV" "$@" </dev/null
 }
 
+RELAY_LIST='There are 0 of a max of 20 players online: '
+
 label() {
   docker inspect --format "{{index .Config.Labels \"mc-harness.$1\"}}" "$SERVER"
 }
@@ -55,6 +57,45 @@ label() {
   [ "$(docker exec "$SERVER" getent hosts bstats.org | cut -d' ' -f1)" = 127.0.0.1 ]
 }
 
+@test "the relay is locked down like the server and has no way out either" {
+  relay=mc-$PROJECT-dev-relay
+  [ "$(docker inspect --format '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.HostConfig.Init}}' "$relay")" = '1000:1000 true [ALL] [no-new-privileges] true' ]
+  [ "$(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$relay" | xargs)" = "mc-$PROJECT-dev-net" ]
+  [ -z "$(docker port "$relay")" ]
+  # tini is PID 1, the daemon its child.
+  [ "$(docker exec "$relay" cat /proc/1/cmdline | tr '\0' ' ')" = '/sbin/docker-init -- node /relay/daemon.ts ' ]
+  # The pod's password reaches the relay through its environment, not argv.
+  pw=$(docker exec "$relay" printenv RCON_PASSWORD)
+  [ -n "$pw" ] && [ "$pw" = "$(docker exec "$SERVER" printenv RCON_PASSWORD)" ]
+  # (`! cmd` would not fail a bats test; `false` in the branch does.)
+  if docker inspect --format '{{.Path}} {{.Args}} {{.Config.Cmd}}' "$relay" | grep -qF -- "$pw"; then false; fi
+  if docker exec "$relay" sh -c 'cat /proc/[0-9]*/cmdline' | grep -qF -- "$pw"; then false; fi
+  run docker exec -i "$relay" bash -s <"$BATS_TEST_DIRNAME/egress-probe"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"no ipv4 default route"* ]]
+  [[ $output == *"ipv6 disabled"* || $output == *"no ipv6 default route"* ]]
+  [[ $output == *"tcp 1.1.1.1:443 unreachable"* ]]
+  [[ $output == *"example.com does not resolve"* ]]
+}
+
+@test "console prints the exact RCON reply, and a second CLI call reuses the relay's connection" {
+  relay=mc-$PROJECT-dev-relay
+  started=$(docker inspect --format '{{.State.StartedAt}}' "$relay")
+  run dev console list
+  [ "$status" -eq 0 ]
+  [ "$output" = "$RELAY_LIST" ]
+  run dev console say hello from the relay
+  [ "$status" -eq 0 ]
+  docker logs "$SERVER" 2>&1 | grep -q 'hello from the relay'
+  # The client exits after each call; the daemon and its one RCON connection stay.
+  [ "$(docker inspect --format '{{.State.Status}} {{.State.StartedAt}}' "$relay")" = "running $started" ]
+  [ "$(docker exec "$SERVER" sh -c 'grep -c "RCON Client .* started" /server/logs/latest.log')" -eq 1 ]
+  run dev console
+  [ "$status" -eq 2 ]
+  [[ $output == *"console needs a server command"* ]]
+}
+
 @test "status and boot-report describe the running pod" {
   run dev status
   [ "$status" -eq 0 ]
@@ -87,6 +128,10 @@ label() {
   [ "$(node -e 'const { DatabaseSync } = require("node:sqlite"); console.log(new DatabaseSync(process.argv[1]).prepare("select v from t").get().v)' "$BATS_TEST_TMPDIR/back.db")" = row ]
   [ "$(label commit)" = "$booted" ]
   docker exec "$SERVER" grep -qx 'motd=vanilla' /server/server.properties
+  # The relay outlived the server's restart and reconnects on the next call.
+  run dev console list
+  [ "$status" -eq 0 ]
+  [ "$output" = "$RELAY_LIST" ]
 }
 
 @test "reset re-applies the fixtures and keeps other state" {
@@ -129,7 +174,19 @@ label() {
   run ! docker exec "$SERVER" test -e /server/state.txt
   [ "$(docker exec "$SERVER" cat /server/fixture.txt)" = 'from fixtures' ]
   # The image of the old commit is pruned; only the running one is left.
-  [ "$(docker image ls -q --filter "label=mc-harness.project=$PROJECT" | sort -u | wc -l)" -eq 1 ]
+  [ "$(docker image ls -q --filter "label=mc-harness.project=$PROJECT" --filter reference='mc-dev:*' | sort -u | wc -l)" -eq 1 ]
+  [ "$(docker image ls -q --filter "label=mc-harness.project=$PROJECT" --filter reference='mc-relay:*' | sort -u | wc -l)" -eq 1 ]
+  # The relay was recreated with the pod.
+  run dev console list
+  [ "$status" -eq 0 ]
+  [ "$output" = "$RELAY_LIST" ]
+}
+
+@test "console refuses with exit 2 when the relay is gone" {
+  docker rm -f "mc-$PROJECT-dev-relay" >/dev/null
+  run dev console list
+  [ "$status" -eq 2 ]
+  [[ $output == *"relay of pod dev is missing"* ]]
 }
 
 @test "join proxies localhost through its own locked-down container; down --all removes everything labelled" {
