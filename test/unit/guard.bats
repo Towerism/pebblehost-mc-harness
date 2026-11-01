@@ -38,7 +38,7 @@ setup() {
   [ "$status" -eq 2 ]
   [[ $output == *"refused 3 path(s)"* ]]
   [[ $output == *"plugins/X/config.yml: denied: plugins/"* ]]
-  [[ $output == *"test/server.jar: denied: *.jar"* ]]
+  [[ $output == *"test/server.jar: denied: *.jar*"* ]]
   [[ $output == *"secret.txt: not in the public allowlist"* ]]
 }
 
