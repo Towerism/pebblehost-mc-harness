@@ -31,11 +31,17 @@ ENV
 # The live server root, as the SFTP user; reset to an empty tree first.
 live() { docker exec -u "$SFTP_UID" -w /home/mc "$SFTP_CONTAINER" sh -c "$1"; }
 live_reset() {
-  docker exec "$SFTP_CONTAINER" sh -c 'cd /home/mc && rm -rf plugins config server.properties purpur.jar world world_nether && mkdir plugins && chown '"$SFTP_UID"' plugins && chmod 755 /home/mc'
+  docker exec "$SFTP_CONTAINER" sh -c 'cd /home/mc && rm -rf plugins config libraries server.properties purpur.jar world world_nether && mkdir plugins && chown '"$SFTP_UID"' plugins && chmod 755 /home/mc'
   docker exec "$SFTP_CONTAINER" sh -c 'touch /home/mc/server.properties /home/mc/purpur.jar && chown '"$SFTP_UID"' /home/mc/server.properties /home/mc/purpur.jar'
 }
 
 main_log() { git -C "$MC_HOME" log --format=%s main; }
+
+# A sync with stdin closed and a hard timeout.
+dev_sync() { timeout 120 "$dev" sync "$@" </dev/null; }
+# Live's tracked files, dated well before any listing: only the 2 s window
+# test wants a file the last listing could have caught mid-write.
+age() { live 'find server.properties purpur.jar plugins $(ls -d libraries 2>/dev/null) -type f -exec touch -d "2026-10-01 00:00:00" {} +'; }
 
 @test "sync commits live drift on main only; a no-op or data-only change makes no commit" {
   run "$dev" sync </dev/null
@@ -131,7 +137,7 @@ main_log() { git -C "$MC_HOME" log --format=%s main; }
 }
 
 @test "inventory proposes files live rewrites between its listings, and data-like directories, as review entries on main" {
-  live 'mkdir -p plugins/Eco/PlayerData && printf "x" >plugins/Eco/PlayerData/a.json && printf "n: 1\n" >plugins/Eco/stats.yml'
+  live 'mkdir -p plugins/Eco/StatsData && printf "x" >plugins/Eco/StatsData/a.json && printf "n: 1\n" >plugins/Eco/stats.yml'
   "$dev" inventory --wait 4 </dev/null >"$BATS_TEST_TMPDIR/inv" 2>&1 &
   pid=$!
   sleep 2
@@ -139,7 +145,7 @@ main_log() { git -C "$MC_HOME" log --format=%s main; }
   wait "$pid"
   cat "$BATS_TEST_TMPDIR/inv"
   grep -q 'review plugins/Eco/stats.yml  (changed between the listings)' "$BATS_TEST_TMPDIR/inv"
-  grep -q 'review plugins/Eco/PlayerData/  (data-like name)' "$BATS_TEST_TMPDIR/inv"
+  grep -q 'review plugins/Eco/StatsData/  (data-like name)' "$BATS_TEST_TMPDIR/inv"
   git -C "$MC_HOME" show main:sync-rules | grep -qx 'review plugins/Eco/stats.yml'
   [[ $(main_log | head -1) == 'chore: sync-rules review entries from inventory ('*')' ]]
   # Review entries change nothing until promoted: config.yml is not proposed.
@@ -182,7 +188,7 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
 
 @test "seed pulls world*/ only with --with-worlds; data that holds no files boots with no fixtures" {
   docker exec "$SFTP_CONTAINER" sh -c "mkdir -p /home/mc/world/region /home/mc/world_nether && echo lvl >/home/mc/world/level.dat && echo n >/home/mc/world_nether/level.dat && chown -R $SFTP_UID /home/mc/world /home/mc/world_nether"
-  live 'mkdir -p plugins/Empty/past && mkdir -p plugins/Logs/logs && printf "x\n" >plugins/Logs/logs/a.log'
+  live 'mkdir -p plugins/Empty/past && mkdir -p plugins/Logger/logs && printf "x\n" >plugins/Logger/logs/a.log'
   run "$dev" seed 6 --no-boot </dev/null
   [ "$status" -eq 0 ]
   [ ! -e "$MC_HOME/.dev/seed-6/home/server" ]
@@ -195,7 +201,7 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
   [ ! -e "$MC_HOME/.dev/seed-6/home/server/plugins" ]
   [[ $output == *"seed: issue/6 ready with data in .dev/seed-6"* ]]
   # A directory with no files, and one whose files are all skipped.
-  run "$dev" seed 6 --with-data plugins/Empty plugins/Logs --no-boot </dev/null
+  run "$dev" seed 6 --with-data plugins/Empty plugins/Logger --no-boot </dev/null
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *"seed: the data paths held no files to pull; booting with no data fixtures"* ]]
@@ -203,4 +209,111 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
   run "$dev" seed 6 --with-data plugins/ajLeaderboards/past-resets --no-boot </dev/null
   [ "$status" -eq 2 ]
   [[ $output == *"sync-rules skip plugins/ajLeaderboards/past-resets/ covers it"* ]]
+}
+
+@test "a second sync with no change downloads nothing and commits nothing; a changed file is one download and one drift commit; a file gone from live is removed" {
+  live 'printf "a: 1\n" >plugins/Eco/gone.yml'
+  age
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: full pull (no stored listing)'* ]]
+  [[ $output == *'sync: done in '* ]]
+  before=$(git -C "$MC_HOME" rev-parse main)
+  # An unreadable file on live: any download attempt of it would fail.
+  live 'chmod 000 plugins/Eco/config.yml'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: downloaded 0 files, removed 0'* ]]
+  [[ $output == *'sync: no live drift'* ]]
+  [[ $output == *'sync: done in '* ]]
+  [ "$(git -C "$MC_HOME" rev-parse main)" = "$before" ]
+  live 'chmod 644 plugins/Eco/config.yml && printf "rate: 22\n" >plugins/Eco/config.yml && touch -d "2026-10-02 00:00:00" plugins/Eco/config.yml'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: downloaded 1 files, removed 0'* ]]
+  [ "$(main_log | head -1)" = 'live drift: 1 files' ]
+  [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/config.yml)" = 'rate: 22' ]
+  live 'rm plugins/Eco/gone.yml'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: downloaded 0 files, removed 1'* ]]
+  [ "$(main_log | head -1)" = 'live drift: 1 files' ]
+  [ "$(git -C "$MC_HOME" show --format= --name-status main)" = "$(printf 'D\tserver/plugins/Eco/gone.yml')" ]
+}
+
+@test "a same-size edit within 2 s of the last listing, keeping the modtime, is pulled again" {
+  age
+  dev_sync
+  # Written just before the listing, then rewritten in the same second
+  # after it: same size, same modtime.
+  live 'printf "rate: 3\n" >plugins/Eco/config.yml'
+  run dev_sync
+  echo "$output"
+  [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/config.yml)" = 'rate: 3' ]
+  live 'touch -r plugins/Eco/config.yml /tmp/ref && printf "rate: 4\n" >plugins/Eco/config.yml && touch -r /tmp/ref plugins/Eco/config.yml'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: downloaded 1 files, removed 0'* ]]
+  [ "$(main_log | head -1)" = 'live drift: 1 files' ]
+  [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/config.yml)" = 'rate: 4' ]
+}
+
+@test "libraries/ is listed again only when a root jar changes, or with --full" {
+  docker exec "$SFTP_CONTAINER" sh -c "mkdir /home/mc/libraries && chown $SFTP_UID /home/mc/libraries"
+  live 'mkdir -p libraries/a && printf "l1" >libraries/a/one.jar'
+  age
+  dev_sync
+  git -C "$MC_HOME" cat-file -e main:server/libraries/a/one.jar
+  live 'printf "l2" >libraries/a/two.jar'
+  age
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: libraries, versions, cache: kept the last listing (no root jar changed)'* ]]
+  [[ $output == *'sync: no live drift'* ]]
+  live 'printf "jar 2\n" >purpur.jar'
+  age
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: libraries, versions, cache: listed again (a root jar changed)'* ]]
+  [ "$(main_log | head -1)" = 'live drift: 2 files' ]
+  git -C "$MC_HOME" cat-file -e main:server/libraries/a/two.jar
+  live 'printf "l3" >libraries/a/three.jar'
+  age
+  run dev_sync --full
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'sync: full pull (--full)'* ]]
+  [ "$(main_log | head -1)" = 'live drift: 1 files' ]
+  git -C "$MC_HOME" cat-file -e main:server/libraries/a/three.jar
+  run dev_sync
+  [[ $output == *'sync: downloaded 0 files, removed 0'* ]]
+}
+
+@test "data and skip rules match names in any case; a stored listing that no longer matches main falls back to a full pull" {
+  live 'mkdir -p plugins/GriefPreventionData/PlayerData && printf "x" >plugins/GriefPreventionData/PlayerData/u.yml && printf "c: 1\n" >plugins/GriefPreventionData/config.yml'
+  age
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  run git -C "$MC_HOME" ls-tree -r --name-only main
+  [[ $output == *server/plugins/GriefPreventionData/config.yml* && $output != *PlayerData* ]]
+  live 'printf "y" >plugins/GriefPreventionData/PlayerData/v.yml'
+  run dev_sync
+  echo "$output"
+  [[ $output == *'sync: no live drift'* ]]
+  # main's server/ changed behind sync's back: the listing can't be trusted.
+  git -C "$MC_HOME/.dev/sync" rm -q server/plugins/Eco/config.yml
+  git -C "$MC_HOME/.dev/sync" commit -q -m 'hand edit'
+  run dev_sync
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"sync: full pull (main's server/ changed since the stored listing)"* ]]
+  git -C "$MC_HOME" cat-file -e main:server/plugins/Eco/config.yml
 }

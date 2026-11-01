@@ -57,7 +57,7 @@ private_repo() {
   [[ $output == *"no pull recorded for 'a.yml'"* ]]
 }
 
-@test "the template's root bin/mc refuses pull outside .dev/, passes ls and .dev pulls through, and push hits the guard" {
+@test "the template's root bin/mc refuses pull and fetch outside .dev/, passes ls and .dev pulls through, and push hits the guard" {
   private_repo
   run env MC_ENV_FILE="$envfile" "$root/bin/mc" pull plugins/a.yml
   [ "$status" -eq 2 ]
@@ -65,6 +65,9 @@ private_repo() {
   run env MC_HOME="$root/.dev/../server" MC_ENV_FILE="$envfile" "$root/bin/mc" pull plugins/a.yml
   [ "$status" -eq 2 ]
   [[ $output == *"pull is refused here"* ]]
+  run env MC_ENV_FILE="$envfile" "$root/bin/mc" fetch <<<plugins/a.yml
+  [ "$status" -eq 2 ]
+  [[ $output == *"fetch is refused here"* ]]
   [ ! -e "$STUB_LOG" ]
   run env MC_ENV_FILE="$envfile" "$root/bin/mc" ls plugins
   [ "$status" -eq 0 ]

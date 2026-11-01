@@ -404,3 +404,30 @@ make_worktree() {
   [ "$status" -eq 2 ]
   [[ $output == *"-l and -R work only with ls"* ]]
 }
+
+@test "MC_FILTER_FILE reaches listings as --filter-from" {
+  printf -- '+ /plugins/**\n- **\n' >"$BATS_TEST_TMPDIR/filter"
+  MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" ls -R -l
+  [ "$status" -eq 0 ]
+  grep -q "^rclone lsf -R --files-only --format stp --separator | --filter-from $BATS_TEST_TMPDIR/filter pebble:$" "$STUB_LOG"
+  MC_FILTER_FILE=$BATS_TEST_TMPDIR/missing run "$mc" ls
+  [ "$status" -eq 2 ]
+  [[ $output == *"MC_FILTER_FILE $BATS_TEST_TMPDIR/missing not found"* ]]
+}
+
+@test "fetch copies the paths on stdin into server/ and records nothing; paths leaving the root are refused" {
+  run "$mc" fetch <<<$'plugins/a.yml\nplugins/B/c.yml'
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *'fetched 2 files -> server/'* ]]
+  grep -q '^rclone copy --files-from-raw .* --no-traverse --ignore-times pebble: '"$MC_HOME/server"'$' "$STUB_LOG"
+  [ ! -e "$MC_HOME/.mc" ]
+  for bad in '../x' 'plugins/../../x' '/etc/passwd'; do
+    run "$mc" fetch <<<"$bad"
+    [ "$status" -eq 2 ]
+    [[ $output == *"fetch: $bad leaves the server root"* ]]
+  done
+  run "$mc" fetch plugins </dev/null
+  [ "$status" -eq 2 ]
+  [[ $output == *"fetch takes its paths on stdin"* ]]
+}

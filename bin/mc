@@ -35,6 +35,7 @@ export TZ=UTC
 usage() {
   cat <<'EOF'
 usage: mc <command> [--all] [-l] [-R] [--] [path]
+       mc fetch <paths
 
   ls   [path]  list one remote directory level (dirs end in /);
                -l, --long adds size in bytes and modtime (UTC);
@@ -45,6 +46,9 @@ usage: mc <command> [--all] [-l] [-R] [--] [path]
   push <path>  upload server/<path>; copies the remote version to
                backups/<ts>/remote/ first, refuses if the remote changed
                since the last pull of that same path
+  fetch        copy the remote files named on stdin (one server-relative
+               path per line) into server/, overwriting; no backups and no
+               recorded listing (bin/dev sync's incremental pull)
 
 pull, diff and push on the server root (no path or .) need --all.
 Paths are relative to the server root, e.g. plugins/CrateReloaded/config.yml
@@ -57,6 +61,8 @@ MC_EXCLUDE_FILE names an rclone exclude file (one pattern per line, matched
 relative to the path given): matching paths are left out of every listing
 and transfer of a directory (rclone takes no filters on a single file;
 bin/dev sync writes one per directory from sync-rules).
+MC_FILTER_FILE names an rclone filter file (+/- rules) for listings:
+bin/dev sync lists its tracked roots in one call with it.
 Exit codes: 0 ok, 1 diff found differences, 2 error.
 EOF
 }
@@ -141,6 +147,10 @@ if [[ -n ${MC_EXCLUDE_FILE:-} ]]; then
   [[ -f $MC_EXCLUDE_FILE ]] || die "MC_EXCLUDE_FILE $MC_EXCLUDE_FILE not found"
   filter=(--exclude-from "$MC_EXCLUDE_FILE")
 fi
+if [[ -n ${MC_FILTER_FILE:-} ]]; then
+  [[ -f $MC_FILTER_FILE ]] || die "MC_FILTER_FILE $MC_FILTER_FILE not found"
+  filter+=(--filter-from "$MC_FILTER_FILE")
+fi
 
 state_file() { printf '%s/%s/%s' "$state" "$1" "$(printf '%s' "$2" | sha1sum | cut -d' ' -f1)"; }
 
@@ -189,6 +199,21 @@ cmd_pull() {
   mv "$tmp/snapshot" "$(state_file remote "$p")"
   local_manifest "$p" >"$(state_file local "$p")"
   echo "pulled ${p:-.} -> server/$p"
+}
+
+# Names come from a listing of live; any that could land outside server/ is refused.
+cmd_fetch() {
+  local p n=0
+  while IFS= read -r p || [[ -n $p ]]; do
+    [[ -n $p ]] || continue
+    [[ $p != /* && /$p/ != */../* ]] || die "fetch: $p leaves the server root"
+    printf '%s\n' "$p" >>"$tmp/fetch"
+    n=$((n + 1))
+  done
+  ((n > 0)) || { echo "fetched 0 files"; return; }
+  # --ignore-times: SFTP modtimes have 1s precision, so an equal-size edit can look unchanged.
+  rclone copy --files-from-raw "$tmp/fetch" --no-traverse --ignore-times "$(remote "")" "$mirror"
+  echo "fetched $n files -> server/"
 }
 
 cmd_diff() {
@@ -244,6 +269,7 @@ main() {
   [[ $path == . ]] && path=""
   case $cmd in
     ls) ;;
+    fetch) [[ -z $path && $all == 0 && $long == 0 && $recursive == 0 ]] || die "fetch takes its paths on stdin, no arguments" ;;
     pull | diff | push)
       [[ $long == 0 && $recursive == 0 ]] || die "-l and -R work only with ls"
       [[ -n $path || $all == 1 ]] || die "$cmd on the server root needs --all"
@@ -261,6 +287,7 @@ main() {
   case $cmd in
     ls) cmd_ls "$path" ;;
     pull) cmd_pull "$path" ;;
+    fetch) cmd_fetch ;;
     diff) cmd_diff "$path" ;;
     push) cmd_push "$path" ;;
   esac

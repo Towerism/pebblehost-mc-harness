@@ -26,9 +26,11 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
                           compared with LOG (default server/logs/latest.log)
   join [--port N] [--stop]
                           proxy 127.0.0.1:N (default 25565) to the server
-  sync                    pull live's tracked roots (minus sync-rules skip and
+  sync [--full]           pull live's tracked roots (minus sync-rules skip and
                           data) in the main worktree .dev/sync and commit
-                          "live drift: <n> files" on main when anything changed
+                          "live drift: <n> files" on main when anything changed;
+                          after the first sync only changed files download
+                          (--full: pull everything again)
   seed N [--with-data PATH...] [--with-worlds] [--no-boot]
                           sync, put the project on issue/N (reused, or cut from
                           main), pull the opt-in data into .dev/seed-N, and boot
@@ -53,10 +55,10 @@ bounds each boot (default 3x the median of the pod's last boots, or 600s).
 server/ comes from $MC_HOME (default: the harness root): git archive of HEAD
 when server/ is tracked, else a plain copy. Exit codes: 0 ok, 2 error.`;
 
-type Opts = { words: string[]; issue?: number; withData: string[]; withWorlds: boolean; noBoot: boolean; wait: number; pod: string; fixtures: string[]; timeout?: number; port: number; all: boolean; follow: boolean; tail?: string; stop: boolean; jar?: string; heap?: string; against?: string };
+type Opts = { words: string[]; full: boolean; issue?: number; withData: string[]; withWorlds: boolean; noBoot: boolean; wait: number; pod: string; fixtures: string[]; timeout?: number; port: number; all: boolean; follow: boolean; tail?: string; stop: boolean; jar?: string; heap?: string; against?: string };
 
 function parse(argv: string[]): { cmd: string; o: Opts } {
-  const o: Opts = { words: [], withData: [], withWorlds: false, noBoot: false, wait: 300, pod: 'dev', fixtures: [], port: 25565, all: false, follow: false, stop: false };
+  const o: Opts = { words: [], full: false, withData: [], withWorlds: false, noBoot: false, wait: 300, pod: 'dev', fixtures: [], port: 25565, all: false, follow: false, stop: false };
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '-h' || cmd === '--help') fail(USAGE);
   for (let i = 0; i < rest.length; i++) {
@@ -85,6 +87,7 @@ function parse(argv: string[]): { cmd: string; o: Opts } {
     else if (a === '--heap') o.heap = val();
     else if (a === '--against') o.against = resolve(val());
     else if (a === '--all') o.all = true;
+    else if (cmd === 'sync' && a === '--full') o.full = true;
     else if (a === '-f' || a === '--follow') o.follow = true;
     else if (a === '--stop') o.stop = true;
     else fail(`unexpected argument ${a}\n${USAGE}`);
@@ -207,7 +210,7 @@ function main(argv: string[]) {
       break;
     }
     case 'sync':
-      syncLive(root);
+      syncLive(root, o.full);
       break;
     case 'seed': {
       if (o.issue === undefined) fail(`seed needs an issue number\n${USAGE}`);

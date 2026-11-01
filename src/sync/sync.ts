@@ -2,18 +2,28 @@
 // persistent worktree of main at .dev/sync (MC_HOME there, MC_ENV_FILE the
 // project's .env, which only bin/mc reads), pulls the tracked roots minus the
 // sync-rules skip and data paths, and commits "live drift: <n> files" on main
-// only when something changed. seed N syncs, puts the project on issue/N and
+// only when something changed. After the first sync it pulls only what changed
+// since the listing stored in .dev/sync-listing.json. seed N syncs, puts the
+// project on issue/N and
 // boots a fresh pod with opt-in data pulled as fixtures. inventory proposes
 // data rules from files live rewrites between two listings.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fail } from '../dev/docker.ts';
 import { git, HARNESS_ROOT, privateDir } from '../dev/image.ts';
 import { readRules, rcloneExcludes, matchRule, writeGitignore, DEFAULT_RULES, type Rule, type RuleClass } from './rules.ts';
 
 // The server paths main tracks, besides the jars at the root.
 export const SYNC_ROOTS = ['server.properties', 'bukkit.yml', 'spigot.yml', 'eula.txt', 'start.sh', 'config', 'plugins', 'libraries', 'versions', 'cache'];
+// Only a server jar update rewrites these: listed again only when a root jar
+// changed, or with sync --full.
+const JAR_ROOTS = ['libraries', 'versions', 'cache'];
+// An incremental sync with no downloads should finish within this.
+const BUDGET_S = 30;
+// SFTP modtimes have 1-second precision: a file dated this close to the last
+// listing's start may have been rewritten in the same second, size unchanged.
+const WINDOW_S = 2;
 
 const say = (msg: string) => process.stdout.write(`${msg}\n`);
 
@@ -31,11 +41,18 @@ export function envFile(root: string): string {
 
 // bin/mc with its own MC_HOME and the project's .env; one rclone retry, so a
 // file live rewrites mid-copy fails the pull instead of re-downloading it all.
-export function mc(home: string, root: string, args: string[], exclude?: string, extra: Record<string, string> = {}): { status: number; out: string } {
+export function mc(home: string, root: string, args: string[], exclude?: string, extra: Record<string, string> = {}, input?: string): { status: number; out: string } {
   const env: Record<string, string | undefined> = { ...process.env, MC_HOME: home, MC_ENV_FILE: envFile(root), RCLONE_RETRIES: '1', MC_EXCLUDE_FILE: exclude, ...extra };
   if (!exclude) delete env.MC_EXCLUDE_FILE;
-  const r = spawnSync(join(HARNESS_ROOT, 'bin/mc'), args, { encoding: 'utf8', env, maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync(join(HARNESS_ROOT, 'bin/mc'), args, { encoding: 'utf8', env, input, maxBuffer: 1 << 28, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
   return { status: r.status ?? 2, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+// A failed transfer: rclone's lines naming files live rewrote mid-copy, or
+// its whole output.
+function transferFailed(what: string, out: string): never {
+  const changed = out.split('\n').filter((l) => /changed|updated|size changed|corrupted/i.test(l));
+  fail(`${what} failed${changed.length ? `; live rewrote files during the copy:\n${changed.join('\n')}\nrun it again` : `:\n${out.trim()}`}`);
 }
 
 // Pull one server path into home/server with the rules of `classes` excluded.
@@ -51,10 +68,7 @@ function pull(home: string, root: string, path: string, rules: Rule[], classes: 
     return;
   }
   const r = mc(home, root, ['pull', path], ex);
-  if (r.status !== 0) {
-    const changed = r.out.split('\n').filter((l) => /changed|updated|size changed|corrupted/i.test(l));
-    fail(`pull of ${path} failed${changed.length ? `; live rewrote files during the copy:\n${changed.join('\n')}\nrun it again` : `:\n${r.out.trim()}`}`);
-  }
+  if (r.status !== 0) transferFailed(`pull of ${path}`, r.out);
 }
 
 export function syncDir(root: string): string {
@@ -79,11 +93,92 @@ function worktree(root: string): string {
   return wt;
 }
 
+// A live file's size and modtime (UTC, 1-second precision) as listed.
+export type Entry = { size: number; time: string };
+export type Listing = Record<string, Entry>;
+// What the last sync saw: its listing, when that listing started (epoch s),
+// and the server/ tree it left on main.
+type Stored = { start: number; tree: string; files: Listing };
+
+const listingFile = (root: string) => join(root, '.dev', 'sync-listing.json');
+const epoch = (time: string) => Date.parse(`${time.replace(' ', 'T')}Z`) / 1000;
+
+// bin/mc ls -R -l lines: size, modtime, then the name after two spaces.
+export function parseListing(out: string): Listing {
+  const files: Listing = {};
+  for (const line of out.split('\n')) {
+    const m = /^ *(\d+) {2}(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) {2}(.+)$/.exec(line);
+    if (m) files[m[3]] = { size: Number(m[1]), time: m[2] };
+  }
+  return files;
+}
+
+// Files to download (new, resized, re-dated, or dated within WINDOW_S of the
+// previous listing's start) and files gone from live.
+export function diffListing(prev: Listing, next: Listing, prevStart: number): { fetch: string[]; remove: string[] } {
+  const fetch = Object.keys(next).filter((p) => {
+    const a = Object.hasOwn(prev, p) ? prev[p] : undefined;
+    return !a || a.size !== next[p].size || a.time !== next[p].time || epoch(next[p].time) >= prevStart - WINDOW_S;
+  });
+  const remove = Object.keys(prev).filter((p) => !Object.hasOwn(next, p));
+  return { fetch: fetch.sort(), remove: remove.sort() };
+}
+
+export function timing(seconds: number, incremental: boolean, downloaded: number): string {
+  const line = `sync: done in ${seconds.toFixed(1)}s`;
+  return incremental && downloaded === 0 && seconds > BUDGET_S ? `${line}\nsync: OVER BUDGET: an incremental sync with no downloads took over ${BUDGET_S}s` : line;
+}
+
+function checkers(): string {
+  const n = process.env.MC_SYNC_CHECKERS || '16';
+  if (!/^[1-9]\d*$/.test(n)) fail(`MC_SYNC_CHECKERS must be a positive integer, got "${n}"`);
+  return n;
+}
+
+// One recursive listing of the given roots (root jars too with `jars`),
+// minus skip and data paths. One call at a time: live's SFTP refuses
+// connections past a few concurrent listers.
+function listLive(wt: string, root: string, rules: Rule[], roots: string[], jars: boolean): Listing {
+  const f = join(wt, '.mc-filter');
+  const ex = rcloneExcludes(rules, ['skip', 'data']).split('\n').filter(Boolean).map((l) => `- ${l}`);
+  const inc = [...roots.flatMap((r) => [`+ /${r}`, `+ /${r}/**`]), ...(jars ? ['+ /*.[jJ][aA][rR]'] : [])];
+  writeFileSync(f, `${[...ex, ...inc, '- **'].join('\n')}\n`);
+  const r = mc(wt, root, ['ls', '-R', '-l'], undefined, { MC_FILTER_FILE: f, RCLONE_CHECKERS: checkers() });
+  rmSync(f, { force: true });
+  if (r.status !== 0) fail(`listing live failed:\n${r.out.trim()}`);
+  const files = parseListing(r.out);
+  // rclone's filters match case; the rules don't.
+  for (const p of Object.keys(files)) if (matchRule(rules, p)) delete files[p];
+  return files;
+}
+
+const underJarRoots = (p: string) => JAR_ROOTS.some((r) => p.startsWith(`${r}/`));
+const rootJars = (files: Listing) =>
+  Object.keys(files)
+    .filter((p) => !p.includes('/') && p.toLowerCase().endsWith('.jar'))
+    .sort()
+    .map((p) => `${p} ${files[p].size} ${files[p].time}`)
+    .join('\n');
+
+function readStored(root: string): Stored | undefined {
+  try {
+    return JSON.parse(readFileSync(listingFile(root), 'utf8')) as Stored;
+  } catch {
+    return undefined;
+  }
+}
+
+const serverTree = (wt: string) => git(wt, ['rev-parse', '-q', '--verify', 'HEAD:server']).stdout.trim();
+
 export type SyncResult = { drift: number; commits: string[] };
 
-export function syncLive(root: string): SyncResult {
+export function syncLive(root: string, full = false): SyncResult {
+  const t0 = Date.now();
   const wt = worktree(root);
   const rules = readRules(wt);
+  const stored = readStored(root);
+  // The stored listing describes main's server/ only if nothing else changed it.
+  const why = full ? '--full' : !stored ? 'no stored listing' : stored.tree !== serverTree(wt) ? "main's server/ changed since the stored listing" : '';
   const commits: string[] = [];
   // Tracked files a skip or data rule now covers leave the index first.
   const tracked = mustGit(wt, ['ls-files', '-z', '--', 'server']).split('\0').filter(Boolean);
@@ -103,6 +198,56 @@ export function syncLive(root: string): SyncResult {
     commit(wt, 'chore: regenerate the sync-rules section of .gitignore');
     commits.push('chore: regenerate the sync-rules section of .gitignore');
   }
+  const start = Date.now() / 1000;
+  const listed = listLive(wt, root, rules, SYNC_ROOTS.filter((r) => !JAR_ROOTS.includes(r)), true);
+  const relist = !!why || !stored || rootJars(stored.files) !== rootJars(listed);
+  const files = { ...listed, ...(relist ? listLive(wt, root, rules, JAR_ROOTS, false) : Object.fromEntries(Object.entries(stored.files).filter(([p]) => underJarRoots(p)))) };
+  let fetched = 0;
+  if (why) {
+    say(`sync: full pull (${why})`);
+    fullPull(wt, root, rules);
+  } else if (stored) {
+    say(`sync: ${JAR_ROOTS.join(', ')}: ${relist ? 'listed again (a root jar changed)' : 'kept the last listing (no root jar changed)'}`);
+    if (Object.keys(files).length === 0) fail('live has none of the tracked roots; is MC_ENV_FILE the right server?');
+    // Unlisted roots keep their stored entries: diff only what was listed.
+    const prev = relist ? stored.files : Object.fromEntries(Object.entries(stored.files).filter(([p]) => !underJarRoots(p)));
+    const { fetch, remove } = diffListing(prev, relist ? files : listed, stored.start);
+    for (const p of remove) rmSync(join(wt, 'server', p), { force: true });
+    if (fetch.length > 0) {
+      const r = mc(wt, root, ['fetch'], undefined, {}, `${fetch.join('\n')}\n`);
+      if (r.status !== 0) transferFailed(`download of ${fetch.length} files`, r.out);
+    }
+    fetched = fetch.length;
+    say(`sync: downloaded ${fetch.length} files, removed ${remove.length}`);
+  }
+  // Written only once main holds what the listing describes.
+  const done = () => {
+    writeFileSync(listingFile(root), JSON.stringify({ start, tree: serverTree(wt), files } satisfies Stored), { mode: 0o600 });
+    say(timing((Date.now() - t0) / 1000, !why, fetched));
+  };
+  mustGit(wt, ['add', '-A', '--', 'server']);
+  const staged = mustGit(wt, ['diff', '--cached', '--name-only', '--', 'server']).split('\n').filter(Boolean);
+  if (staged.length === 0) {
+    say('sync: no live drift');
+    done();
+    return { drift: 0, commits };
+  }
+  const guard = spawnSync(join(HARNESS_ROOT, 'bin/path-guard'), ['--staged', '--profile', 'private'], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (guard.status !== 0) {
+    mustGit(wt, ['reset', '-q', '--hard']);
+    fail(`the private guard refused the drift; nothing committed (add sync-rules for these paths):\n${(guard.stderr || guard.stdout).trim()}`);
+  }
+  const msg = `live drift: ${staged.length} files`;
+  commit(wt, msg);
+  commits.push(msg);
+  say(`sync: committed "${msg}" on main`);
+  done();
+  return { drift: staged.length, commits };
+}
+
+// Today's full re-pull: every tracked root live has, replaced whole. rclone's
+// excludes match case and the rules don't: what they let through goes after.
+function fullPull(wt: string, root: string, rules: Rule[]): void {
   const ls = mc(wt, root, ['ls']);
   if (ls.status !== 0) fail(`bin/mc ls failed:\n${ls.out.trim()}`);
   const names = ls.out.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -116,22 +261,10 @@ export function syncLive(root: string): SyncResult {
     pull(wt, root, r, rules, ['skip', 'data'], dirs.has(r));
     say(`sync: pulled ${r}`);
   }
-  mustGit(wt, ['add', '-A', '--', 'server']);
-  const staged = mustGit(wt, ['diff', '--cached', '--name-only', '--', 'server']).split('\n').filter(Boolean);
-  if (staged.length === 0) {
-    say('sync: no live drift');
-    return { drift: 0, commits };
+  const server = join(wt, 'server');
+  for (const e of existsSync(server) ? readdirSync(server, { recursive: true, withFileTypes: true }) : []) {
+    if (e.isFile() && matchRule(rules, relative(server, join(e.parentPath, e.name)))) rmSync(join(e.parentPath, e.name));
   }
-  const guard = spawnSync(join(HARNESS_ROOT, 'bin/path-guard'), ['--staged', '--profile', 'private'], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  if (guard.status !== 0) {
-    mustGit(wt, ['reset', '-q', '--hard']);
-    fail(`the private guard refused the drift; nothing committed (add sync-rules for these paths):\n${(guard.stderr || guard.stdout).trim()}`);
-  }
-  const msg = `live drift: ${staged.length} files`;
-  commit(wt, msg);
-  commits.push(msg);
-  say(`sync: committed "${msg}" on main`);
-  return { drift: staged.length, commits };
 }
 
 export type SeedOpts = { withData: string[]; withWorlds: boolean };
