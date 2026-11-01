@@ -118,6 +118,35 @@ EOF
   [[ $output == *"G9: the green's volume "*" was explored"* ]]
 }
 
+@test "another committed check repairing the server first: the green is not the first run on its volume" {
+  mkdir -p "$MC_HOME/checks/7-repair"
+  echo '{"kind":"e2e"}' >"$MC_HOME/checks/7-repair/profile.json"
+  cat >"$MC_HOME/checks/7-repair/repair.test.ts" <<'EOF'
+import { test } from 'node:test';
+import { dev } from '#harness/dev';
+
+test('sets normal difficulty through the relay', async () => {
+  await dev.console('difficulty normal');
+});
+EOF
+  git -C "$MC_HOME" add checks/7-repair
+  git -C "$MC_HOME" commit -q -m 'a check that repairs the server'
+  run dev rebuild
+  [ "$status" -eq 0 ]
+  run check run 7-repair
+  [ "$status" -eq 0 ]
+  run check run 7-difficulty
+  [ "$status" -eq 0 ]
+  [ "$(rec 5 explored)" = false ]
+  [ "$(rec 5 runIndex)" = 1 ]
+  [ "$(docker exec "$SERVER" wc -l </dev/null /server/.mc-harness-runs | cut -d' ' -f1)" = 2 ]
+  commit_records
+  run check gate 7-difficulty
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [[ $output == *"G9: the green was run 1 check run(s) into its volume"* ]]
+}
+
 @test "a fix commit counts only once rebuilt; then the gate passes, confirms, and allows the docs" {
   # HEAD has moved past the booted commit (record commits); the pod hasn't.
   booted=$(label commit)
@@ -126,7 +155,7 @@ EOF
   git -C "$MC_HOME" commit -q -am 'fix: normal difficulty'
   # Not rebuilt yet: the pod still reports the booted commit.
   run check run 7-difficulty
-  [ "$(rec 4 commit)" = "$booted" ]
+  [ "$(rec 6 commit)" = "$booted" ]
   run check postmortem 7-difficulty
   [ "$status" -eq 2 ]
   [[ $output == *"the gate refuses 7-difficulty"* ]]
@@ -134,9 +163,9 @@ EOF
   [ "$status" -eq 0 ]
   run check run 7-difficulty
   [ "$status" -eq 0 ]
-  [ "$(rec 5 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
-  [ "$(rec 5 explored)" = false ]
-  [ "$(rec 5 generation)" != "$(rec 0 generation)" ]
+  [ "$(rec 7 commit)" = "$(git -C "$MC_HOME" rev-parse HEAD)" ]
+  [ "$(rec 7 explored)" = false ]
+  [ "$(rec 7 generation)" != "$(rec 0 generation)" ]
   # The records must be committed before the gate counts them.
   run check gate 7-difficulty
   [ "$status" -eq 2 ]
@@ -146,8 +175,8 @@ EOF
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *"gate: 7-difficulty passed and confirmed"* ]]
-  [ "$(rec 6 confirm)" = true ]
-  [ "$(rec 6 pass)" = true ]
+  [ "$(rec 8 confirm)" = true ]
+  [ "$(rec 8 pass)" = true ]
   run check postmortem 7-difficulty
   [ "$status" -eq 0 ]
   pm=$(ls "$MC_HOME"/docs/postmortems/*-7-difficulty.md)
