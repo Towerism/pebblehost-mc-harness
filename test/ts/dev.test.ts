@@ -233,10 +233,28 @@ test('the build context holds the committed bytes: replace refs are ignored, exp
   buildContext(source(root), ctx);
   assert.equal(readFileSync(join(ctx, 'cfg/a.yml'), 'utf8'), 'name: bad\n');
   // Local attributes that drop or rewrite files in git archive.
-  for (const attr of ['server/a.yml export-ignore\n', 'server/b.yml export-subst\n']) {
+  for (const [attr, why] of [['server/a.yml export-ignore\n', /\na\.yml: missing/], ['server/b.yml export-subst\n', /\nb\.yml: content differs/]] as const) {
     write(root, { '.git/info/attributes': attr });
-    assert.throws(() => buildContext(source(root), tmp()), /git archive of server\/ at [0-9a-f]{12} is not its tree/, attr);
+    assert.throws(() => buildContext(source(root), tmp()), (e: Error) => /git archive of server\/ at [0-9a-f]{12} is not its tree/.test(e.message) && why.test(e.message), attr);
   }
+});
+
+test('the build context accepts archive filters that map back to the tree: an LFS-like smudge/clean driver and eol=crlf', () => {
+  const root = gitRepo({ '.gitattributes': 'server/*.jar filter=fake\nserver/*.txt text eol=crlf\n' });
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const g = (...args: string[]) => spawnSync('git', ['-C', root, ...args], { env, encoding: 'utf8' });
+  // A pointer file in the repo, the real bytes in the checkout (like git-lfs).
+  g('config', 'filter.fake.smudge', 'sed s/^pointer/payload/');
+  g('config', 'filter.fake.clean', 'sed s/^payload/pointer/');
+  commitAll(root, { 'server/a.jar': 'payload 1\n', 'server/notes.txt': 'one\ntwo\n' });
+  assert.equal(g('show', 'HEAD:server/a.jar').stdout, 'pointer 1\n');
+  const ctx = tmp();
+  buildContext(source(root), ctx);
+  assert.equal(readFileSync(join(ctx, 'bin/a.jar'), 'utf8'), 'payload 1\n');
+  assert.equal(readFileSync(join(ctx, 'cfg/notes.txt'), 'utf8'), 'one\r\ntwo\r\n');
+  // export-ignore is still caught with the filters in place.
+  write(root, { '.git/info/attributes': 'server/notes.txt export-ignore\n' });
+  assert.throws(() => buildContext(source(root), tmp()), /\nnotes\.txt: missing/);
 });
 
 test('stepCached reads classic and BuildKit output', () => {
