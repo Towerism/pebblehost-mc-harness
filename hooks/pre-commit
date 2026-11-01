@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Refuse a commit that stages a path the guard rejects. Installed by `make hooks`.
+set -euo pipefail
+
+exec "$(dirname "$0")/../bin/path-guard" --staged

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# path-guard: refuse commits and pushes that would put server files in this
+# public repo. See src/guard/paths.ts for the rules.
+set -euo pipefail
+
+exec node "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/guard/cli.ts" "$@"
