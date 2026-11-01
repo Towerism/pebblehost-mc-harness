@@ -15,10 +15,13 @@ export class LiveReadOnlyError extends Error {}
 
 export const onLive = () => process.env.MC_TARGET === 'live';
 
-export function refuseOnLive(what: string, need: 'console' | 'bot'): never {
+// need 'restart': declared by "restart" or "exclusive" in profile.json (as
+// MC_RESTART_OK) or by needing the console.
+export function refuseOnLive(what: string, need: 'console' | 'bot' | 'restart'): never {
   const needs = (process.env.MC_NEEDS ?? '').split(',');
-  if (needs.includes(need)) throw new LiveReadOnlyError(`${LIVE_SKIP} ${what} needs the ${need}, which the live target doesn't have: skipped`);
-  throw new LiveReadOnlyError(`${what} is not available on the live target, and the check's profile.json doesn't declare "needs": ["${need}"]`);
+  const declared = need === 'restart' ? process.env.MC_RESTART_OK === '1' || needs.includes('console') : needs.includes(need);
+  if (declared) throw new LiveReadOnlyError(`${LIVE_SKIP} ${what} needs the ${need}, which the live target doesn't have: skipped`);
+  throw new LiveReadOnlyError(`${what} is not available on the live target, and the check's profile.json doesn't declare ${need === 'restart' ? '"restart": true' : `"needs": ["${need}"]`}`);
 }
 
 // Pull one server path from live into the run's home and return the local

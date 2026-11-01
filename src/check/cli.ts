@@ -214,7 +214,8 @@ function main(argv: string[]) {
       const { confirm, why } = confirmCheck(records, v.green);
       if (!confirm) fail(`${cmd}: the green of ${o.id} is not confirmed (${why}); run bin/dev rebuild, then bin/check gate ${o.id}`);
       if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${o.id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
-      say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm)}`);
+      const live = records.filter((r) => r.check === o.id && r.target === 'live').at(-1);
+      say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm, live)}`);
       break;
     }
   }

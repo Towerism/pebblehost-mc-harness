@@ -28,7 +28,7 @@ export type Row = Record<string, unknown>;
 // Only a check whose profile declares restart or exclusive may restart its
 // pod: the suite schedules those last on a shared pod, or alone.
 function restart(reset: boolean): void {
-  if (onLive()) refuseOnLive(`dev.${reset ? 'reset' : 'restart'}()`, 'console');
+  if (onLive()) refuseOnLive(`dev.${reset ? 'reset' : 'restart'}()`, 'restart');
   if (process.env.MC_RESTART_OK !== '1') throw new Error(`dev.${reset ? 'reset' : 'restart'}() needs "restart": true or "exclusive": true in the check's profile.json`);
   restartServer(pod(), d, reset);
 }

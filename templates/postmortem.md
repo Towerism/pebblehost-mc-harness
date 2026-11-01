@@ -58,6 +58,12 @@ Confirm:
 {{confirm}}
 ```
 
+Latest read-only live check (target live):
+
+```json
+{{live}}
+```
+
 Output of the red run (tail):
 
 ```

@@ -42,7 +42,8 @@ export function pushList(root: string, base: string): string {
   }).join('\n');
 }
 
-export function writeDoc(root: string, kind: 'postmortem' | 'runbook', red: RunRecord, green: RunRecord, confirm: RunRecord): string {
+// live: the check's latest read-only live record (bin/check run --target live), if any.
+export function writeDoc(root: string, kind: 'postmortem' | 'runbook', red: RunRecord, green: RunRecord, confirm: RunRecord, live?: RunRecord): string {
   const date = new Date().toLocaleDateString('sv');
   const slug = red.check.replace(new RegExp(`^${red.issue}-`), '');
   const dir = join(root, 'docs', kind === 'postmortem' ? 'postmortems' : 'runbooks');
@@ -58,7 +59,7 @@ export function writeDoc(root: string, kind: 'postmortem' | 'runbook', red: RunR
     redCommit: red.commit,
     greenCommit: green.commit,
     ...(kind === 'postmortem'
-      ? { serverDiff: mustGit(root, ['diff', '--stat', red.commit, green.commit, '--', 'server/']), serverPatch: serverPatch(root, red.commit, green.commit), red: json(red), green: json(green), confirm: json(confirm), redOutput: red.output }
+      ? { serverDiff: mustGit(root, ['diff', '--stat', red.commit, green.commit, '--', 'server/']), serverPatch: serverPatch(root, red.commit, green.commit), red: json(red), green: json(green), confirm: json(confirm), redOutput: red.output, live: live ? json(live) : 'none yet: run bin/check run ' + red.check + ' --target live --issue ' + red.issue + ' after the runbook, then regenerate or paste its record here' }
       : { base, files: pushList(root, base) }),
   };
   mkdirSync(dir, { recursive: true });

@@ -2,7 +2,8 @@
 // bare-text loop with real git, G10 on real files, and the confirm rules.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { readRecords } from '../../src/check/record.ts';
 import { check, commit, git, project } from './project.ts';
 
@@ -43,11 +44,14 @@ test('bare-text red, fix, green, committed records, gate with its confirm run, t
   assert.equal(r.status, 2);
   assert.match(r.stderr, /the confirm record of 3-crate is not committed as is in \.verify\/runs\/issue-3\.jsonl; commit it first \(G10\)/);
   records(root);
+  // The check's latest live record (bin/check run --target live) is quoted; the gate ignores it.
+  const last = readRecords(root, 3).at(-1);
+  appendFileSync(join(root, '.verify/runs/issue-3.jsonl'), `${JSON.stringify({ ...last, target: 'live', confirm: false, source: 'live', time: '2099-01-01T00:00:00.000Z' })}\n`);
   r = check(root, {}, 'postmortem', '3-crate');
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /docs\/postmortems\/\d{4}-\d\d-\d\d-3-crate\.md/);
   const pm = readFileSync(r.stdout.trim().replace(/^postmortem: wrote /, ''), 'utf8');
-  for (const part of ['# Postmortem: crate (issue 3)', '## Cause', '## Fix diff review', "+  name: 'Vote Crate!'", 'Commit `.verify/runs/issue-3.jsonl`', '## Wrong turns', `failed on commit \`${redCommit}\``, '"pass": false', '"confirm": true']) assert.ok(pm.includes(part), part);
+  for (const part of ['# Postmortem: crate (issue 3)', '## Cause', '## Fix diff review', "+  name: 'Vote Crate!'", 'Commit `.verify/runs/issue-3.jsonl`', '## Wrong turns', `failed on commit \`${redCommit}\``, '"pass": false', '"confirm": true', 'Latest read-only live check', '"target": "live"']) assert.ok(pm.includes(part), part);
   assert.ok(!pm.includes('{{'), 'unfilled template field');
   r = check(root, {}, 'postmortem', '3-crate');
   assert.equal(r.status, 2);
