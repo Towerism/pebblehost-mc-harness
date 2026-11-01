@@ -324,7 +324,8 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
 @test "a listing stored without a window start, by an earlier sync, is diffed as usual" {
   age
   dev_sync
-  node -e 'const f = process.argv[1]; const fs = require("fs"); const s = JSON.parse(fs.readFileSync(f, "utf8")); delete s.since; delete s.rules; fs.writeFileSync(f, JSON.stringify(s))' "$MC_HOME/.dev/sync-listing.json"
+  # As the first incremental version stored it: no window start.
+  node -e 'const f = process.argv[1]; const fs = require("fs"); const s = JSON.parse(fs.readFileSync(f, "utf8")); delete s.since; fs.writeFileSync(f, JSON.stringify(s))' "$MC_HOME/.dev/sync-listing.json"
   live 'printf "rate: 77\n" >plugins/Eco/config.yml'
   run dev_sync
   echo "$output"
@@ -345,6 +346,19 @@ excludes() { node -e 'import(process.argv[1]).then((m) => process.stdout.write(m
   [ "$status" -eq 0 ]
   [ "$(main_log | head -1)" = 'live drift: 2 files' ]
   [ "$(git -C "$MC_HOME" show main:server/plugins/Eco/thing/a.yml)" = 'x' ]
+}
+
+@test "a seed drops what a rule covers that its per-directory excludes can't express" {
+  dev_sync
+  printf '%s\n' "$(cat "$BATS_TEST_DIRNAME/../../templates/sync-rules")" 'skip plugins/*/tmp/' >"$MC_HOME/.dev/sync/sync-rules"
+  git -C "$MC_HOME/.dev/sync" add sync-rules
+  git -C "$MC_HOME/.dev/sync" commit -q -m 'skip plugin tmp dirs'
+  live 'mkdir -p plugins/X/tmp && printf "t\n" >plugins/X/tmp/a.tmp && printf "d\n" >plugins/X/data.yml'
+  run timeout 120 "$dev" seed 8 --with-data plugins/X --no-boot </dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ -f "$MC_HOME/.dev/seed-8/home/server/plugins/X/data.yml" ]
+  [ ! -e "$MC_HOME/.dev/seed-8/home/server/plugins/X/tmp/a.tmp" ]
 }
 
 @test "a skip directory in another case never reaches a seed" {

@@ -274,8 +274,9 @@ export function syncLive(root: string, full = false): SyncResult {
   return { drift: staged.length, commits };
 }
 
-// Today's full re-pull: every tracked root live has, replaced whole. rclone's
-// excludes match case and the rules don't: what they let through goes after.
+// Today's full re-pull: every tracked root live has, replaced whole. What the
+// per-directory excludes can't express (an anchored rule with a glob above the
+// pulled directory) goes after.
 function fullPull(wt: string, root: string, rules: Rule[]): void {
   const ls = mc(wt, root, ['ls']);
   if (ls.status !== 0) fail(`bin/mc ls failed:\n${ls.out.trim()}`);
