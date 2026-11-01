@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { docker as d, must } from '../dev/docker.ts';
-import { names, podOf, relayRequest } from '../dev/pod.ts';
+import { names, podOf, relayRequest, restartServer } from '../dev/pod.ts';
 
 function pod() {
   if (process.env.MC_TARGET !== undefined && process.env.MC_TARGET !== 'dev') throw new Error(`target ${process.env.MC_TARGET} is not supported`);
@@ -22,7 +22,22 @@ function serverPath(path: string): string {
 
 export type Row = Record<string, unknown>;
 
+// Only a check whose profile declares restart or exclusive may restart its
+// pod: the suite schedules those last on a shared pod, or alone.
+function restart(reset: boolean): void {
+  if (process.env.MC_RESTART_OK !== '1') throw new Error(`dev.${reset ? 'reset' : 'restart'}() needs "restart": true or "exclusive": true in the check's profile.json`);
+  restartServer(pod(), d, reset);
+}
+
 export const dev = {
+  // Restart the server on the same volume (state kept) and wait for "Done".
+  async restart(): Promise<void> {
+    restart(false);
+  },
+  // Restart and apply the fixtures again (bin/dev reset).
+  async reset(): Promise<void> {
+    restart(true);
+  },
   // The exact RCON reply.
   async console(command: string): Promise<string> {
     return String(relayRequest(pod(), d, { op: 'console', command }).reply);

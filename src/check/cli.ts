@@ -1,16 +1,20 @@
 // bin/check: run checks, record them, and gate the red→green pair.
 // Exit 0 ok (a check that passed), 1 a check that failed (recorded), 2
 // refused or failed to run. Never prompts.
-import { readdirSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail } from '../dev/docker.ts';
-import { HARNESS_ROOT, labels } from '../dev/image.ts';
-import { isExplored, names, podOf, RUN_LOG, state } from '../dev/pod.ts';
+import { HARNESS_ROOT, labels, privateDir } from '../dev/image.ts';
+import { isExplored, killOrphanSuite, names, podOf, RUN_LOG, state, suitePidFile } from '../dev/pod.ts';
 import { parseBareText } from '../gate/bareText.ts';
 import { writeDoc } from '../gate/docs.ts';
 import { confirmCheck, evaluate, gitRepo, type Verdict } from '../gate/gate.ts';
 import { issueOf, readRecords, runsFile, type Kind, type RunRecord } from './record.ts';
-import { readProfile, runCheck } from './run.ts';
+import { readProfile } from './profile.ts';
+import { runCheck } from './run.ts';
+import { runSuite, teardownSuitePods } from './suite.ts';
+import { formatTimings } from './timings.ts';
 
 const USAGE = `usage: check <command> <id> [options]
 
@@ -25,6 +29,10 @@ const USAGE = `usage: check <command> <id> [options]
   postmortem <id>         write docs/postmortems/<date>-<N>-<slug>.md
   runbook <id>            write docs/runbooks/<date>-<N>-<slug>.md
                           (both only after a confirmed gate pass)
+  suite [--jar NAME] [--heap SIZE] [--timeout S]
+                          every committed check: bare-text first, then one pod
+                          per fixture profile, torn down after; prints and
+                          writes .dev/runs/<ts>/timings.json; records nothing
 
 --fresh rebuilds the pod from HEAD on a new volume first: only a red run on
 such a volume, untouched by bin/dev console or join, counts for the gate.
@@ -33,7 +41,7 @@ checks/<id>/profile.json gives the kind: {"kind": "e2e"} or {"kind":
 or --issue N. The project is $MC_HOME (default: the harness root).
 Exit codes: 0 passed, 1 failed (recorded), 2 refused.`;
 
-type Opts = { id?: string; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number };
+type Opts = { id?: string; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number; jar?: string; heap?: string };
 
 function parse(argv: string[]): { cmd: string; o: Opts } {
   const o: Opts = { pod: 'dev', fresh: false, confirm: true, timeout: 600 };
@@ -47,6 +55,8 @@ function parse(argv: string[]): { cmd: string; o: Opts } {
     else if (a === '--timeout') o.timeout = Number(val());
     else if (a === '--fresh') o.fresh = true;
     else if (a === '--no-confirm') o.confirm = false;
+    else if (a === '--jar') o.jar = val();
+    else if (a === '--heap') o.heap = val();
     else if (!a.startsWith('-') && o.id === undefined) o.id = a;
     else fail(`unexpected argument ${a}\n${USAGE}`);
   }
@@ -82,10 +92,69 @@ function verdict(root: string, id: string, issue: number, records: RunRecord[]):
   return { ...evaluate(records, { id, issue, kind, ...bare }, gitRepo(root)), kind };
 }
 
+function suiteParent(root: string, argv: string[]): void {
+  // A suite whose parent was SIGKILLed can leave its child and pods behind.
+  if (killOrphanSuite(root)) say('suite: stopped an orphaned suite run');
+  const left = teardownSuitePods(root, d);
+  if (left > 0) say(`suite: removed ${left} leftover suite resource(s)`);
+  const child = spawn(process.execPath, [import.meta.filename, ...argv], { stdio: 'inherit', detached: true, env: { ...process.env, MC_HOME: root, MC_SUITE_CHILD: '1' } });
+  privateDir(join(root, '.dev'));
+  writeFileSync(suitePidFile(root), `${child.pid}\n`, { mode: 0o600 });
+  let signal: NodeJS.Signals | null = null;
+  const stop = (sig: NodeJS.Signals) => {
+    if (signal) return;
+    signal = sig;
+    process.stderr.write(`check: ${sig}: stopping the suite\n`);
+    try {
+      process.kill(-(child.pid as number), 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  child.on('exit', (code) => {
+    rmSync(suitePidFile(root), { force: true });
+    if (signal === null) process.exit(code ?? 2);
+    // A docker call the kill cut short can still finish creating its
+    // resource a moment later: sweep again until a pass finds nothing.
+    let removed = 0;
+    for (let pass = 0; pass < 5; pass++) {
+      let n = 0;
+      try {
+        n = teardownSuitePods(root, d);
+      } catch (e) {
+        process.stderr.write(`check: teardown after ${signal}: ${(e as Error).message}\n`);
+        n = -1;
+      }
+      if (n === 0 && pass > 0) break;
+      removed += Math.max(n, 0);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
+    say(`suite: ${signal}: removed ${removed} suite resource(s)`);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  });
+}
+
 function main(argv: string[]) {
   const { cmd, o } = parse(argv);
   const root = resolve(process.env.MC_HOME || HARNESS_ROOT);
-  if (!['run', 'gate', 'postmortem', 'runbook'].includes(cmd)) fail(`unknown command ${cmd}\n${USAGE}`);
+  if (!['run', 'gate', 'postmortem', 'runbook', 'suite'].includes(cmd)) fail(`unknown command ${cmd}\n${USAGE}`);
+  if (cmd === 'suite') {
+    if (o.id !== undefined) fail(`suite takes no check id\n${USAGE}`);
+    // The suite is synchronous end to end, so it runs in a child whose
+    // parent can react to SIGINT/SIGTERM: kill the child's process group,
+    // remove every suite pod by label, exit 130/143.
+    if (process.env.MC_SUITE_CHILD !== '1') {
+      suiteParent(root, argv);
+      return;
+    }
+    const { timings, file, checks, failed } = runSuite({ root, timeoutS: o.timeout, jar: o.jar, heap: o.heap }, d);
+    say(formatTimings(timings));
+    say(`suite: ${checks} check(s), ${failed.length} failed or refused${failed.length ? ` (${failed.join(', ')})` : ''}; ${timings.profiles.length} pod(s); timings in ${file}`);
+    process.exitCode = failed.length > 0 ? 1 : 0;
+    return;
+  }
   if (o.id === undefined) fail(`${cmd} needs a check id\n${USAGE}`);
   const issue = issueOf(root, o.issue);
   switch (cmd) {

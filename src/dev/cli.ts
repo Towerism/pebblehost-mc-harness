@@ -5,7 +5,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail, must } from './docker.ts';
 import { build, buildRelay, chooseJar, dirtyHarness, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
-import { bootTimeout, createJoin, createPod, formatBootReport, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
+import { bootTimeout, createJoin, createPod, formatBootReport, killOrphanSuite, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
 
 const USAGE = `usage: dev <command> [--pod ID] [options]
 
@@ -87,8 +87,9 @@ function requireServer(p: Pod): string {
 // Build first; only then replace the old pod (rebuild), so a failed build
 // leaves it running. Then create the pod on a new volume generation (fresh:
 // made by bin/check run --fresh), wait for "Done" and drop the project's
-// images no container uses any more.
-export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean, fresh = false) {
+// images no container uses any more. Returns the image cache hit and the
+// build and boot wall times.
+export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean, fresh = false): { cacheHit: boolean; buildSeconds: number; bootSeconds: number } {
   const src = refuseDirty(p.root);
   const jar = chooseJar(src, pf.jar);
   const harness = dirtyHarness();
@@ -113,6 +114,7 @@ export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: 
   const pruned = pruneImages(d, p.project, [built.tag, relayTag]);
   const from = built.id.source === 'archive' ? `commit ${built.id.commit}` : 'plain server/ copy, not a commit';
   say(`up: pod ${p.pod} done in ${secs}s (${from}, ${jar}, image ${built.id.image.slice(0, 12)}${pruned ? `, ${pruned} old image(s) removed` : ''})`);
+  return { cacheHit: built.cacheHit, buildSeconds: Number(took), bootSeconds: Date.now() / 1000 - since };
 }
 
 // waitDone with the timeout given or derived from the pod's boot history;
@@ -157,6 +159,7 @@ function main(argv: string[]) {
       break;
     }
     case 'down':
+      if (o.all && killOrphanSuite(p.root)) say('down: stopped an orphaned bin/check suite run');
       say(`down: removed ${removePod(p, o.all, d)} resource(s)`);
       break;
     case 'status': {
