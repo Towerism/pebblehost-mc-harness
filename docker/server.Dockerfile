@@ -10,8 +10,8 @@ COPY --chown=1000:1000 cfg /server/
 COPY --chown=1000:1000 ovr /server/
 COPY entrypoint.sh /usr/local/bin/mc-entrypoint
 
-ARG MC_JAR
-ENV MC_JAR=$MC_JAR JAVA_OPTS="-Xms512M -Xmx2G"
+# MC_JAR (which root jar to run) comes from bin/dev at run time.
+ENV JAVA_OPTS="-Xms512M -Xmx2G"
 USER 1000:1000
 WORKDIR /server
 EXPOSE 25565

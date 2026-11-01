@@ -26,6 +26,10 @@ view-distance=3
 simulation-distance=3
 spawn-protection=0
 EOF
+  # A CRLF YAML whose override keeps its size (true\r -> false): the image
+  # must still carry it (bin/dev verifies every override after each build).
+  mkdir -p "$MC_HOME/server/config"
+  printf 'update-checker:\r\n  enabled: true\r\n' >"$MC_HOME/server/config/paper-global.yml"
   echo 'from fixtures' >"$FIXTURES/fixture.txt"
   git -C "$MC_HOME" add server
   git -C "$MC_HOME" commit -q -m 'vanilla server'

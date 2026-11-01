@@ -3,13 +3,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DevError, type Docker } from '../../src/dev/docker.ts';
-import { build, buildContext, dirHash, HARNESS_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
-import { applyOverrides, setProperty } from '../../src/dev/overrides.ts';
-import { createJoin, createPod, mergeFixtures, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
+import { build, buildContext, chooseJar, dirHash, HARNESS_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
+import { applyOverrides, OVERRIDES, setProperty, setYaml } from '../../src/dev/overrides.ts';
+import { bootTimeout, createJoin, createPod, EGRESS_SINKS, formatBootReport, mergeFixtures, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dev-test-'));
 
@@ -58,23 +59,67 @@ test('setProperty rewrites only the key, keeping comments and other lines', () =
   assert.equal(setProperty('motd=hi\n', 'online-mode', 'false'), null);
 });
 
-test('overrides set online-mode=false in server.properties', () => {
+test('setYaml edits one nested key, matching whole keys at the right depth only', () => {
+  const yaml = ['# top', 'Misc:', '  Other:', '    Enabled: true', '  AutoUpdate:', '    # note', '    Enabled: true # inline', '    Mode: x', 'Enabled: true', ''].join('\n');
+  assert.equal(setYaml(yaml, 'Misc.AutoUpdate.Enabled', 'false'), yaml.replace('    Enabled: true # inline', '    Enabled: false'));
+  assert.equal(setYaml(yaml, 'Enabled', 'false'), yaml.replace(/^Enabled: true$/m, 'Enabled: false'));
+  assert.equal(setYaml(yaml, 'Misc.Missing.Enabled', 'false'), null);
+  assert.equal(setYaml(yaml, 'AutoUpdate', 'false'), null, 'a nested key is not a top-level one');
+  assert.equal(setYaml('"check-for-updates": true\n', 'check-for-updates', 'false'), '"check-for-updates": false\n');
+  assert.equal(setYaml('check-for-updates-extra: true\n', 'check-for-updates', 'false'), null);
+});
+
+// A synthetic file holding `key` (dotted) as true, between two siblings.
+function synthetic(o: { file: string; key: string }): string {
+  if (o.file.endsWith('.properties')) return `motd=hi\n${o.key}=true\nmax-players=5\n`;
+  const segs = o.key.split('.');
+  const lines = ['first: 1'];
+  segs.forEach((s, i) => lines.push(`${'  '.repeat(i)}${s}:${i === segs.length - 1 ? ' true' : ''}`));
+  lines.push('last: 2', '');
+  return lines.join('\n');
+}
+
+for (const o of OVERRIDES) {
+  test(`override sets ${o.file} ${o.key}=${o.value}`, () => {
+    const cfg = tmp();
+    write(cfg, { [o.file]: synthetic(o) });
+    const a = applyOverrides(cfg, [o])[0];
+    assert.equal(a.set, 1);
+    assert.match(a.notes[0], new RegExp(`${o.key.replace(/\./g, '\\.')}=${o.value}`));
+    const leaf = o.key.split('.').pop() ?? '';
+    const want = o.file.endsWith('.properties') ? `${leaf}=${o.value}` : `${leaf}: ${o.value}`;
+    assert.ok(a.content?.split('\n').some((l) => l.trim() === want), want);
+    assert.ok(a.content?.includes('first: 1') || a.content?.includes('motd=hi'));
+  });
+}
+
+test('overrides keep CRLF line endings, so an edit can keep the file size', () => {
+  const yaml = 'Options:\r\n  Updater: true\r\n  Other: 1\r\n';
+  const out = setYaml(yaml, 'Options.Updater', 'false');
+  assert.equal(out, 'Options:\r\n  Updater: false\r\n  Other: 1\r\n');
+  assert.equal(setProperty('motd=a\r\nonline-mode=true\r\n', 'online-mode', 'false'), 'motd=a\r\nonline-mode=false\r\n');
+  // true\r -> false: the classic builder's same-size case this guards against.
+  assert.equal(setYaml('k: true\r\n', 'k', 'fals'), 'k: fals\r\n');
+});
+
+test('every override in a file applies in order to one rewritten copy', () => {
   const cfg = tmp();
-  write(cfg, { 'server.properties': 'online-mode=true\nmotd=hi\n' });
-  const [a] = applyOverrides(cfg);
-  assert.equal(a.content, 'online-mode=false\nmotd=hi\n');
-  assert.match(a.note, /online-mode=false/);
+  write(cfg, { 'plugins/Lottery/config.yml': 'UpdateCheck: true\nMetrics: true\nPrize: 5\n' });
+  const a = applyOverrides(cfg).find((x) => x.file === 'plugins/Lottery/config.yml');
+  assert.equal(a?.content, 'UpdateCheck: false\nMetrics: false\nPrize: 5\n');
+  assert.equal(a?.set, 2);
 });
 
 test('an override is a no-op with a note when its file or key is absent', () => {
-  const [absent] = applyOverrides(tmp());
-  assert.equal(absent.content, null);
-  assert.match(absent.note, /server.properties absent/);
+  const all = applyOverrides(tmp());
+  assert.ok(all.every((a) => a.content === null && a.set === 0));
+  assert.match(all[0].notes[0], /server.properties absent/);
   const cfg = tmp();
   write(cfg, { 'server.properties': 'motd=hi\n' });
-  const [nokey] = applyOverrides(cfg);
+  const nokey = applyOverrides(cfg)[0];
   assert.equal(nokey.content, 'motd=hi\n');
-  assert.match(nokey.note, /no online-mode key/);
+  assert.equal(nokey.set, 0);
+  assert.match(nokey.notes[0], /no online-mode key/);
 });
 
 test('treeHash ignores checks/, docs/ and .verify/; a server change moves it', () => {
@@ -135,18 +180,42 @@ test('the build context puts jars and libraries in bin/, the rest in cfg/, overr
     'server/server.properties': 'online-mode=true\n',
   });
   const ctx = tmp();
-  const { jar } = buildContext(source(root), ctx);
-  assert.equal(jar, 'purpur.jar');
+  buildContext(source(root), ctx);
   for (const f of ['purpur.jar', 'libraries/x/y.jar', 'cache/mojang.jar', 'versions/26.1.2/v.jar', 'plugins/P.JAR']) assert.ok(existsSync(join(ctx, 'bin', f)), f);
   for (const f of ['plugins/P/config.yml', 'server.properties']) assert.ok(existsSync(join(ctx, 'cfg', f)), f);
   assert.equal(readFileSync(join(ctx, 'ovr/server.properties'), 'utf8'), 'online-mode=false\n');
   assert.equal(readFileSync(join(ctx, 'cfg/server.properties'), 'utf8'), 'online-mode=true\n');
   assert.ok(existsSync(join(ctx, 'Dockerfile')) && existsSync(join(ctx, 'entrypoint.sh')));
+  // ovr/ files get an mtime 2s past their cfg/ copy.
+  assert.ok(statSync(join(ctx, 'ovr/server.properties')).mtimeMs >= statSync(join(ctx, 'cfg/server.properties')).mtimeMs + 1999);
 });
 
-test('the build context needs exactly one root jar and refuses committed symlinks', () => {
-  assert.throws(() => buildContext(source(gitRepo({ 'server/a.jar': '1', 'server/b.jar': '2' })), tmp()), /exactly one \*\.jar.*a\.jar, b\.jar/);
-  assert.throws(() => buildContext(source(gitRepo({ 'server/plugins/x.yml': '1' })), tmp()), /found none/);
+test('build verifies every overridden file in the image and removes an image that lacks one', () => {
+  const root = gitRepo({ 'server/a.jar': '1', 'server/server.properties': 'online-mode=true\n' });
+  const want = createHash('sha256').update('online-mode=false\n').digest('hex');
+  const ok = recorder({ 'image inspect': { status: 1 }, 'run --rm': `${want}  /server/server.properties\n` });
+  const built = build(source(root), ok.d, 'proj1234');
+  assert.ok(built.notes.includes('1 overridden file(s) verified in the image'));
+  const check = ok.calls.find((c) => c[0] === 'run') ?? [];
+  assert.deepEqual(check.slice(-2), [built.tag, '/server/server.properties']);
+  const stale = recorder({ 'image inspect': { status: 1 }, 'run --rm': `${'0'.repeat(64)}  /server/server.properties\n` });
+  assert.throws(() => build(source(root), stale.d, 'proj1234'), /lacks overridden file\(s\): server\.properties; image removed/);
+  assert.ok(stale.calls.some((c) => c.join(' ').startsWith('image rm -f mc-dev:')));
+});
+
+test('chooseJar: the only root jar, else --jar, which must be a root jar', () => {
+  assert.equal(chooseJar(source(gitRepo({ 'server/purpur.jar': '1', 'server/plugins/p.jar': '2' }))), 'purpur.jar');
+  const two = source(gitRepo({ 'server/a.jar': '1', 'server/b.jar': '2' }));
+  assert.throws(() => chooseJar(two), /2 root jars \(a\.jar, b\.jar\); pick one with --jar NAME/);
+  assert.equal(chooseJar(two, 'b.jar'), 'b.jar');
+  assert.throws(() => chooseJar(two, 'plugins/p.jar'), /not a jar at the server\/ root/);
+  assert.throws(() => chooseJar(source(gitRepo({ 'server/x.yml': '1' }))), /no \*\.jar at its root/);
+  const dir = tmp();
+  write(dir, { 'server/a.jar': '1', 'server/c.jar': '2' });
+  assert.equal(chooseJar(source(dir), 'c.jar'), 'c.jar');
+});
+
+test('the build context refuses committed symlinks', () => {
   const root = gitRepo({ 'server/a.jar': '1' });
   symlinkSync('/etc/passwd', join(root, 'server/link'));
   commitAll(root, {});
@@ -199,22 +268,23 @@ test('pruneImages keeps the new image and images a container uses', () => {
 test('createPod: internal IPv4-only network without a gateway, labelled volume, no published port', () => {
   const p = podOf(tmp(), 'dev');
   const { d, calls, envs } = recorder();
-  createPod(p, { tag: 'mc-dev:abc', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw' }, d);
+  createPod(p, { tag: 'mc-dev:abc', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw' }, d);
   const labels = ['--label', `mc-harness.project=${p.project}`, '--label', 'mc-harness.pod=dev'];
   const prefix = `mc-${p.project}-dev`;
   assert.deepEqual(calls[0], ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labels, `${prefix}-net`]);
   assert.deepEqual(calls[1], ['volume', 'create', ...labels, `${prefix}-server`]);
   const run = calls[2];
   assert.deepEqual(run.slice(0, 8), ['run', '-d', '--name', `${prefix}-server`, '--hostname', 'mc-dev', '--network', `${prefix}-net`]);
-  const pairs = [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '4096']];
+  const pairs = [labels.slice(0, 2), labels.slice(2), ['--label', 'mc-harness.fixtures=f00'], ['-v', `${prefix}-server:/server`], ['-v', '/fx:/fixtures:ro'], ['-e', 'RCON_PASSWORD'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '4096'], ['-e', 'MC_JAR=purpur.jar'], ['--add-host', 'bstats.org:127.0.0.1']];
   for (const pair of pairs) assert.ok(run.join('\0').includes(pair.join('\0')), pair.join(' '));
   assert.ok(!run.some((a) => a === '-p' || a.startsWith('--publish') || a === '-P' || a === '--memory'));
   assert.ok(!run.some((a) => a.startsWith('RCON_PASSWORD=') || a.includes('pw')), 'RCON password in argv');
   assert.deepEqual(envs[2], { RCON_PASSWORD: 'pw' });
+  assert.equal(run.filter((a) => a === '--add-host').length, EGRESS_SINKS.length);
   assert.equal(run[run.length - 1], 'mc-dev:abc');
   assert.equal(calls.length, 3);
   const mem = recorder();
-  createPod(p, { tag: 'mc-dev:abc', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', memory: '6g' }, mem.d);
+  createPod(p, { tag: 'mc-dev:abc', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', memory: '6g' }, mem.d);
   assert.ok(mem.calls[2].join('\0').includes(['--memory', '6g'].join('\0')));
 });
 
@@ -266,18 +336,53 @@ test('mergeFixtures: union of sources, identical overlap allowed, conflicting ov
 test('parseBootReport finds the boot time, enabled plugins, failures and errors', () => {
   const log = [
     '[00:00:01] [Server thread/INFO]: [LuckPerms] Enabling LuckPerms v5.4.1',
+    '[00:00:01] [Server thread/INFO]: [CombatLogX] Enabling expansions...',
     '[00:00:02] [Server thread/INFO]: [Votifier] Enabling Votifier v2.7',
     '[00:00:02] [Server thread/ERROR]: Error occurred while enabling Votifier v2.7 (Is it up to date?)',
+    'java.lang.IllegalStateException: wrapper',
+    '\tat some.Frame(Frame.java:1)',
+    'Caused by: java.net.BindException: Address in use',
+    '\tat other.Frame(Frame.java:2)',
+    '[00:00:02] [Yggdrasil Key Fetcher/ERROR]: Failed to request yggdrasil public key',
+    '[00:00:02] [Server thread/ERROR]: [GrimAC] SLF4J(W): No SLF4J providers were found.',
+    '[00:00:02] [ForkJoinPool/ERROR]: [x.UpdateNotification] Failed to check for latest build',
     "[00:00:01] [Server thread/ERROR]: Could not load 'plugins/Broken.jar' in folder 'plugins'",
     '[00:00:03] [Server thread/ERROR]: something else',
+    '[00:00:03] [Server thread/INFO]: [CrazyEnvoys] Done (1.5s)!',
     '[00:00:04] [Server thread/INFO]: Done (12.345s)! For help, type "help"',
   ].join('\n');
   const r = parseBootReport(log);
   assert.equal(r.done, 12.345);
-  assert.deepEqual(r.enabled, ['LuckPerms', 'Votifier']);
+  assert.deepEqual(r.enabled, ['LuckPerms'], 'Votifier failed after its Enabling line');
   assert.deepEqual(r.failed.map((f) => f.plugin), ['Votifier', 'Broken']);
+  assert.equal(r.failed[0].cause, 'Caused by: java.net.BindException: Address in use');
+  assert.equal(r.failed[1].cause, r.failed[1].line, 'no trace after it');
   assert.deepEqual(r.errors, ['[00:00:03] [Server thread/ERROR]: something else']);
+  assert.equal(r.noise, 3);
   assert.equal(parseBootReport('').done, null);
+});
+
+test('formatBootReport against live: N/M, each plugin missing on dev with its error line', () => {
+  const live = parseBootReport(['[00:00:01] [Server thread/INFO]: [A] Enabling A v1', '[00:00:01] [Server thread/INFO]: [B] Enabling B v1', '[00:00:01] [Server thread/INFO]: [C] Enabling C v1', '[00:00:01] [Server thread/INFO]: Done (30.5s)! For help, type "help"'].join('\n'));
+  const dev = parseBootReport(['[00:00:01] [Server thread/INFO]: [A] Enabling A v1', '[00:00:01] [Server thread/INFO]: [B] Enabling B v1', '[00:00:01] [Server thread/ERROR]: Error occurred while enabling B v1 (Is it up to date?)', '[00:00:01] [Server thread/INFO]: [D] Enabling D v1', '[00:00:01] [Server thread/INFO]: Done (40s)! For help, type "help"'].join('\n'));
+  const out = formatBootReport(dev, live);
+  assert.match(out, /done: 40s \(live: 30\.5s\)/);
+  assert.match(out, /plugins enabled: 1\/3 of live/);
+  assert.match(out, /not enabled: B: \[00:00:01\] \[Server thread\/ERROR\]: Error occurred while enabling B/, 'no trace: the error line itself');
+  assert.match(out, /not enabled: C: no error line names it/);
+  assert.match(out, /enabled on dev only: D/);
+});
+
+test('a failed plugin with a trace but no Caused by reports the first trace line', () => {
+  const r = parseBootReport(['[00:00:01] [Server thread/ERROR]: Error occurred while enabling X v1 (Is it up to date?)', 'java.lang.NullPointerException: world is null', '\tat a.B(B.java:1)', '[00:00:02] [Server thread/INFO]: next'].join('\n'));
+  assert.equal(r.failed[0].cause, 'java.lang.NullPointerException: world is null');
+  assert.match(formatBootReport(r), /offline noise: 0/);
+});
+
+test('bootTimeout is 3x the median recorded boot, at least 120s, 600s with none', () => {
+  assert.equal(bootTimeout([]), 600);
+  assert.equal(bootTimeout([10]), 120);
+  assert.equal(bootTimeout([100, 50, 60]), 180);
 });
 
 // The CLI against a fake docker that knows no containers.
@@ -294,6 +399,19 @@ test('bin/dev up refuses uncommitted server/ changes with exit 2', () => {
   const r = cli(root, 'up');
   assert.equal(r.status, 2);
   assert.match(r.stderr, /uncommitted changes[\s\S]*server\/new\.yml/);
+});
+
+test('bin/dev up refuses several root jars without --jar, and a --jar that is not one', () => {
+  const root = gitRepo({ 'server/a.jar': '1', 'server/b.jar': '2' });
+  let r = cli(root, 'up');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /pick one with --jar NAME/);
+  r = cli(root, 'up', '--jar', 'c.jar');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /--jar c\.jar is not a jar/);
+  r = cli(root, 'up', '--heap', 'lots');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /bad --heap/);
 });
 
 test('bin/dev refuses unknown commands, bad flags and absent pods with exit 2', () => {

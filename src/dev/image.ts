@@ -3,7 +3,7 @@
 // with the identity a run record reads back from the running container.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
 import { applyOverrides } from './overrides.ts';
@@ -99,9 +99,27 @@ function isBin(rel: string): boolean {
   return ['libraries', 'versions', 'cache'].includes(top) || rel.toLowerCase().endsWith('.jar');
 }
 
-// Lay out ctx/{bin,cfg,ovr} plus the Dockerfile and entrypoint. Returns the
-// server jar: the one *.jar at the server root.
-export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROOT): { jar: string; notes: string[] } {
+// The *.jar files at the server root, sorted.
+export function rootJars(src: Source): string[] {
+  const names = src.kind === 'git' ? mustGit(src.root, ['ls-tree', '--name-only', src.commit, 'server/']).split('\n').map((p) => p.slice('server/'.length)) : readdirSync(join(src.root, 'server'));
+  return names.filter((f) => f.toLowerCase().endsWith('.jar')).sort();
+}
+
+// Which root jar the server runs: `wanted` (bin/dev --jar), else the only
+// one. Hosts like PebbleHost pick the jar outside the files, so a tree with
+// several needs --jar.
+export function chooseJar(src: Source, wanted?: string): string {
+  const jars = rootJars(src);
+  if (wanted !== undefined) {
+    if (!jars.includes(wanted)) fail(`--jar ${wanted} is not a jar at the server/ root (found: ${jars.join(', ') || 'none'})`);
+    return wanted;
+  }
+  if (jars.length !== 1) fail(`server/ has ${jars.length ? `${jars.length} root jars (${jars.join(', ')}); pick one with --jar NAME` : 'no *.jar at its root'}`);
+  return jars[0];
+}
+
+// Lay out ctx/{bin,cfg,ovr} plus the Dockerfile and entrypoint.
+export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROOT): { notes: string[] } {
   for (const d of ['bin', 'cfg', 'ovr']) mkdirSync(join(ctx, d), { recursive: true });
   let base: string;
   if (src.kind === 'git') {
@@ -124,16 +142,19 @@ export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROO
   if (src.kind === 'git') rmSync(base, { recursive: true, force: true });
   const notes: string[] = [];
   for (const a of applyOverrides(join(ctx, 'cfg'))) {
-    notes.push(a.note);
-    if (a.content === null) continue;
-    mkdirSync(dirname(join(ctx, 'ovr', a.file)), { recursive: true });
-    writeFileSync(join(ctx, 'ovr', a.file), a.content);
+    notes.push(...a.notes);
+    if (a.content === null || a.set === 0) continue;
+    const ovr = join(ctx, 'ovr', a.file);
+    mkdirSync(dirname(ovr), { recursive: true });
+    writeFileSync(ovr, a.content);
+    // The classic builder drops a later-layer file whose size and mtime
+    // second match the earlier layer's copy; an edit can keep the size.
+    const mtime = statSync(join(ctx, 'cfg', a.file)).mtimeMs / 1000 + 2;
+    utimesSync(ovr, mtime, mtime);
   }
   cpSync(join(harnessRoot, 'docker/server.Dockerfile'), join(ctx, 'Dockerfile'));
   cpSync(join(harnessRoot, 'docker/entrypoint.sh'), join(ctx, 'entrypoint.sh'));
-  const jars = readdirSync(join(ctx, 'bin')).filter((f) => f.toLowerCase().endsWith('.jar'));
-  if (jars.length !== 1) fail(`server/ needs exactly one *.jar at its root, found ${jars.length ? jars.join(', ') : 'none'}`);
-  return { jar: jars[0], notes };
+  return { notes };
 }
 
 // Whether the build output shows the step running `step` taken from cache:
@@ -155,16 +176,32 @@ export function build(src: Source, d: Docker, project: string, harnessRoot = HAR
   if (d(['image', 'inspect', tag]).status === 0) return { tag, id, cacheHit: true, jarLayerCached: true, notes: [] };
   const ctx = mkdtempSync(join(privateDir(join(src.root, '.dev')), 'build-'));
   try {
-    const { jar, notes } = buildContext(src, ctx, harnessRoot);
+    const { notes } = buildContext(src, ctx, harnessRoot);
     const labels = { source: id.source, commit: id.commit, tree: id.tree, harness: id.harness, image: id.image, project };
-    const args = ['build', '-f', join(ctx, 'Dockerfile'), '--build-arg', `MC_JAR=${jar}`, '-t', tag];
+    const args = ['build', '-f', join(ctx, 'Dockerfile'), '-t', tag];
     for (const [k, v] of Object.entries(labels)) args.push('--label', `mc-harness.${k}=${v}`);
     const r = d([...args, ctx]);
     if (r.status !== 0) fail(`docker build failed:\n${(r.stdout + r.stderr).split('\n').slice(-30).join('\n')}`);
-    return { tag, id, cacheHit: false, jarLayerCached: stepCached(r.stdout + r.stderr, 'COPY --chown=1000:1000 bin '), notes };
+    const checked = verifyOverrides(d, tag, join(ctx, 'ovr'));
+    return { tag, id, cacheHit: false, jarLayerCached: stepCached(r.stdout + r.stderr, 'COPY --chown=1000:1000 bin '), notes: [...notes, `${checked} overridden file(s) verified in the image`] };
   } finally {
     rmSync(ctx, { recursive: true, force: true });
   }
+}
+
+// Every file in the context's ovr/ must be byte-equal in the built image;
+// otherwise the image is removed and the build fails. Returns the count.
+export function verifyOverrides(d: Docker, tag: string, ovr: string): number {
+  const files = walk(ovr);
+  if (files.length === 0) return 0;
+  const r = d(['run', '--rm', '--network', 'none', '--entrypoint', 'sha256sum', tag, ...files.map((f) => `/server/${f}`)]);
+  const got = new Map(r.stdout.split('\n').filter(Boolean).map((l) => [l.slice(66), l.slice(0, 64)] as [string, string]));
+  const bad = files.filter((f) => got.get(`/server/${f}`) !== sha256(readFileSync(join(ovr, f))));
+  if (r.status !== 0 || bad.length > 0) {
+    d(['image', 'rm', '-f', tag]);
+    fail(`the built image lacks overridden file(s): ${bad.join(', ') || r.stderr.trim()}; image removed`);
+  }
+  return files.length;
 }
 
 // .dev/ holds merged fixtures and build contexts, which can carry server

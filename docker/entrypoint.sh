@@ -12,6 +12,7 @@ if [ ! -e .mc-harness-seeded ]; then
 fi
 
 : "${RCON_PASSWORD:?RCON_PASSWORD is not set}"
+: "${MC_JAR:?MC_JAR is not set}"
 set_prop() {
   touch server.properties
   awk -v k="$1" -v v="$2" '

@@ -2,13 +2,55 @@
 // egress), a named volume at /server and a read-only /fixtures. Everything
 // carries the labels mc-harness.project and mc-harness.pod, which down uses.
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fail, must, type Docker } from './docker.ts';
 import { dirHash, privateDir, walk } from './image.ts';
 
 export const SOCAT_IMAGE = 'alpine/socat@sha256:466c8a0383e16463fabdb7df01008292fb78d07da60224a46cb5d3142ce122ed';
 export const MARKER = '/server/.mc-harness-seeded';
+
+// Update, metrics and download hosts plugins call at boot. The pod has no
+// route out anyway; pointing them at 127.0.0.1 makes each call fail at once
+// (connection refused) instead of waiting on a DNS timeout.
+export const EGRESS_SINKS = [
+  'bstats.org',
+  'api.spigotmc.org',
+  'www.spigotmc.org',
+  'api.spiget.org',
+  'api.modrinth.com',
+  'cdn.modrinth.com',
+  'hangar.papermc.io',
+  'api.papermc.io',
+  'fill.papermc.io',
+  'api.purpurmc.org',
+  'api.github.com',
+  'github.com',
+  'raw.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'api.polymart.org',
+  'api.curseforge.com',
+  'dev.bukkit.org',
+  'servermods.forgesvc.net',
+  'ci.codemc.io',
+  'repo.codemc.io',
+  'repo.maven.apache.org',
+  'repo1.maven.org',
+  'api.mojang.com',
+  'sessionserver.mojang.com',
+  'api.minecraftservices.com',
+  'piston-meta.mojang.com',
+  'textures.minecraft.net',
+  'api.luckperms.net',
+  'metadata.luckperms.net',
+  'bytebin.lucko.me',
+  'spark.lucko.me',
+  'api.viaversion.com',
+  'grim.ac',
+  'api.extendedclip.com',
+  'update.citizensnpcs.co',
+  'api.crazycrew.us',
+];
 
 export type Pod = { root: string; project: string; pod: string };
 
@@ -47,7 +89,7 @@ export function mergeFixtures(sources: string[], dest: string): string {
   return dirHash(dest);
 }
 
-export type Spec = { tag: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string; memory?: string };
+export type Spec = { tag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; javaOpts?: string; memory?: string };
 
 // Network, volume and container. No published port: bin/dev join adds a proxy.
 // The RCON password reaches docker through its environment, never argv.
@@ -57,7 +99,8 @@ export function createPod(p: Pod, s: Spec, d: Docker): void {
   must(d, ['volume', 'create', ...labelArgs(p), n.vol]);
   const run = ['run', '-d', '--name', n.server, '--hostname', `mc-${p.pod}`, '--network', n.net, ...labelArgs(p)];
   run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`);
-  run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', 'RCON_PASSWORD');
+  run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', 'RCON_PASSWORD', '-e', `MC_JAR=${s.jar}`);
+  for (const host of EGRESS_SINKS) run.push('--add-host', `${host}:127.0.0.1`);
   if (s.javaOpts) run.push('-e', `JAVA_OPTS=${s.javaOpts}`);
   if (s.memory) run.push('--memory', s.memory);
   run.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '4096', '--stop-timeout', '60', s.tag);
@@ -109,14 +152,18 @@ export function state(d: Docker, container: string): string | null {
 
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-// Wait for "Done (Ns)!" in the log since `since` (unix seconds). On timeout or
+// The server's own ready line. Plugins print "Done (Ns)!" too, so the match
+// needs the "]: " prefix and the "For help" that follows.
+export const DONE = /\]: Done \(([\d.,]+)s\)! For help/;
+
+// Wait for the server's "Done (Ns)!" in the log since `since` (unix seconds). On timeout or
 // exit, copy latest.log into the pod's directory and fail. Returns N.
 export function waitDone(p: Pod, d: Docker, since: number, timeoutS: number): number {
   const n = names(p);
   const deadline = Date.now() + timeoutS * 1000;
   for (;;) {
     const log = d(['logs', '--since', since.toFixed(3), n.server]);
-    const m = /Done \(([\d.,]+)s\)!/.exec(log.stdout + log.stderr);
+    const m = DONE.exec(log.stdout + log.stderr);
     if (m) return Number(m[1].replace(',', '.'));
     const st = state(d, n.server);
     if (st !== 'running' || Date.now() > deadline) {
@@ -131,32 +178,88 @@ export function waitDone(p: Pod, d: Docker, since: number, timeoutS: number): nu
   }
 }
 
-export type BootReport = { done: number | null; enabled: string[]; failed: { plugin: string; line: string }[]; errors: string[] };
+export type BootReport = { done: number | null; enabled: string[]; failed: { plugin: string; line: string; cause: string }[]; errors: string[]; noise: number };
+
+// ERROR lines expected from any offline pod: auth key fetches, update and
+// version checks, SLF4J's no-provider notice.
+export const OFFLINE_NOISE = [/yggdrasil|publickeys/i, /SLF4J/, /update ?check|check(ing)? for (an? )?updates?|latest (build|release|version)/i];
 
 // Read a server's latest.log: boot time, plugins enabled, plugins that failed
 // to load or enable, and ERROR lines.
 export function parseBootReport(log: string): BootReport {
-  const r: BootReport = { done: null, enabled: [], failed: [], errors: [] };
-  for (const line of log.split('\n')) {
-    const done = /Done \(([\d.,]+)s\)!/.exec(line);
+  const r: BootReport = { done: null, enabled: [], failed: [], errors: [], noise: 0 };
+  const lines = log.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const done = DONE.exec(line);
     if (done && r.done === null) r.done = Number(done[1].replace(',', '.'));
-    const en = /\]: \[[^\]]+\] Enabling (\S+)/.exec(line);
+    // "Enabling <Name> v<version>" only: plugins also log "Enabling x...".
+    const en = /\]: \[[^\]]+\] Enabling (\S+) v\d/.exec(line);
     if (en && !r.enabled.includes(en[1])) r.enabled.push(en[1]);
     const bad = /Error occurred while enabling (\S+)/.exec(line) ?? /Could not load '(?:.*\/)?([^/']+?)\.jar'/.exec(line) ?? /Could not load plugin '(?:.*\/)?([^/']+?)\.jar'/.exec(line);
-    if (bad) r.failed.push({ plugin: bad[1], line: line.trim() });
-    else if (/[ /](ERROR|SEVERE)\]:/.test(line)) r.errors.push(line.trim());
+    if (bad) {
+      r.failed.push({ plugin: bad[1], line: line.trim(), cause: cause(lines, i) });
+      // "Enabling X" comes before the failure: X did not end up enabled.
+      r.enabled = r.enabled.filter((e) => e.toLowerCase() !== bad[1].toLowerCase());
+    }
+    else if (/[ /](ERROR|SEVERE)\]:/.test(line)) {
+      if (OFFLINE_NOISE.some((re) => re.test(line))) r.noise++;
+      else r.errors.push(line.trim());
+    }
   }
   return r;
 }
 
-export function formatBootReport(r: BootReport): string {
-  const out = [`done: ${r.done === null ? 'not reached' : `${r.done}s`}`, `plugins enabled: ${r.enabled.length}${r.enabled.length ? ` (${r.enabled.join(', ')})` : ''}`];
-  out.push(`plugins failed: ${r.failed.length}`, ...r.failed.map((f) => `  ${f.plugin}: ${f.line}`));
+// The first "Caused by:" of the stack trace after line i, else its first line.
+function cause(lines: string[], i: number): string {
+  const trace: string[] = [];
+  for (let j = i + 1; j < lines.length && !/^\[\d/.test(lines[j]); j++) trace.push(lines[j].trim());
+  return trace.find((l) => l.startsWith('Caused by:')) ?? trace.find(Boolean) ?? lines[i].trim();
+}
+
+// With `live` (the live server's latest.log), compare the plugins enabled:
+// N/M, each one live enabled and dev did not, with its dev error line, and
+// any the dev pod enabled that live did not.
+export function formatBootReport(r: BootReport, live?: BootReport): string {
+  const out = [`done: ${r.done === null ? 'not reached' : `${r.done}s`}${live?.done != null ? ` (live: ${live.done}s)` : ''}`];
+  if (live) {
+    const lower = new Set(r.enabled.map((e) => e.toLowerCase()));
+    const missing = live.enabled.filter((e) => !lower.has(e.toLowerCase()));
+    const liveLower = new Set(live.enabled.map((e) => e.toLowerCase()));
+    out.push(`plugins enabled: ${live.enabled.length - missing.length}/${live.enabled.length} of live`);
+    for (const m of missing) {
+      const line = r.failed.find((f) => f.plugin.toLowerCase() === m.toLowerCase())?.cause ?? r.errors.find((e) => e.toLowerCase().includes(m.toLowerCase()));
+      out.push(`  not enabled: ${m}: ${line ?? 'no error line names it'}`);
+    }
+    for (const extra of r.enabled.filter((e) => !liveLower.has(e.toLowerCase()))) out.push(`  enabled on dev only: ${extra}`);
+  } else {
+    out.push(`plugins enabled: ${r.enabled.length}${r.enabled.length ? ` (${r.enabled.join(', ')})` : ''}`);
+  }
+  out.push(`plugins failed: ${r.failed.length}`, ...r.failed.map((f) => `  ${f.plugin}: ${f.cause}`));
   out.push(`errors: ${r.errors.length}`, ...r.errors.slice(0, 20).map((e) => `  ${e}`));
+  out.push(`offline noise: ${r.noise} (auth key fetch, update checks, SLF4J)`);
   return out.join('\n');
 }
 
-export type PodFile = { fixtures: string[] };
+// Boot wall times of the pod's last successful boots, newest last.
+export function readBoots(p: Pod): number[] {
+  const f = join(names(p).dir, 'boots.json');
+  return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as number[]) : [];
+}
+
+export function recordBoot(p: Pod, seconds: number): void {
+  const f = join(names(p).dir, 'boots.json');
+  writeFileSync(f, `${JSON.stringify([...readBoots(p), Math.round(seconds * 10) / 10].slice(-5))}\n`, { mode: 0o600 });
+}
+
+// 3x the median of the recorded boots (at least 120s); 600s before any.
+export function bootTimeout(boots: number[]): number {
+  if (boots.length === 0) return 600;
+  const s = [...boots].sort((a, b) => a - b);
+  return Math.max(120, Math.ceil(3 * s[Math.floor(s.length / 2)]));
+}
+
+export type PodFile = { fixtures: string[]; jar?: string; heap?: string };
 
 export function readPodFile(p: Pod): PodFile {
   const f = join(names(p).dir, 'pod.json');

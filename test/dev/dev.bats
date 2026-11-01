@@ -26,6 +26,7 @@ label() {
   [ "$status" -eq 0 ]
   [[ $output == *"image: built mc-dev:"* ]]
   [[ $output == *"override: server.properties: online-mode=false"* ]]
+  [[ $output == *"override: 2 overridden file(s) verified in the image"* ]]
   [[ $output == *"up: pod dev done in"* ]]
   [ "$(docker exec "$SERVER" cat /server/fixture.txt)" = 'from fixtures' ]
   docker exec "$SERVER" grep -qx 'online-mode=false' /server/server.properties
@@ -50,6 +51,8 @@ label() {
   [[ $output == *"example.com does not resolve"* ]]
   [[ $output == *"nothing on 8192"* ]]
   [ -z "$(docker port "$SERVER")" ]
+  # Update and metrics hosts are sunk to localhost, so calls fail at once.
+  [ "$(docker exec "$SERVER" getent hosts bstats.org | cut -d' ' -f1)" = 127.0.0.1 ]
 }
 
 @test "status and boot-report describe the running pod" {
@@ -104,13 +107,13 @@ label() {
 
 @test "a rebuild whose build fails leaves the old pod running" {
   booted=$(label commit)
-  echo 'not a jar' >"$MC_HOME/server/extra.jar"
+  ln -s eula.txt "$MC_HOME/server/link"
   git -C "$MC_HOME" add server
-  git -C "$MC_HOME" commit -q -m 'second root jar'
+  git -C "$MC_HOME" commit -q -m 'committed symlink'
   run dev rebuild
   git -C "$MC_HOME" reset -q --hard HEAD~1
   [ "$status" -eq 2 ]
-  [[ $output == *"exactly one *.jar"* ]]
+  [[ $output == *"symlinks refused in server/: server/link"* ]]
   [ "$(docker inspect --format '{{.State.Status}}' "$SERVER")" = running ]
   [ "$(label commit)" = "$booted" ]
   [ "$(docker exec "$SERVER" cat /server/state.txt)" = kept ]

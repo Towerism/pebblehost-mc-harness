@@ -42,7 +42,7 @@ Background sessions may edit files only inside their worktree. Run the worktree'
 
 ## `bin/dev`: local dev server
 
-`bin/dev up` builds `mc-dev:<hash>` from the committed `server/` and boots it in Docker with no network access. `bin/dev restart` keeps server state, `bin/dev rebuild` boots a new commit on a fresh volume, `bin/dev reset` re-applies `--fixtures` dirs, `bin/dev boot-report` summarises the boot, `bin/dev join` lets a Minecraft client connect on `127.0.0.1:25565`, and `bin/dev down` removes the pod. `up` and `rebuild` refuse uncommitted `server/` changes (exit 2); commit first. Dev images and `.dev/` hold the server's configs and secrets: never push or share them; `bin/dev down --all` removes the images.
+`bin/dev up` builds `mc-dev:<hash>` from the committed `server/` and boots it in Docker with no network access. `bin/dev restart` keeps server state, `bin/dev rebuild` boots a new commit on a fresh volume, `bin/dev reset` re-applies `--fixtures` dirs, `bin/dev boot-report` summarises the boot, `bin/dev join` lets a Minecraft client connect on `127.0.0.1:25565`, and `bin/dev down` removes the pod. `up` and `rebuild` refuse uncommitted `server/` changes (exit 2); commit first. An untracked `server/` (the live copy pulled here) boots from a plain copy: `bin/dev up --jar purpur.jar --heap 6G`, then `bin/dev boot-report` compares it with the live `logs/latest.log`. Its output quotes server log lines, which may include player names, UUIDs and IPs: never paste it into a PR, issue or commit. The dev server generates a fresh world when `world*/` was not pulled. Dev images and `.dev/` hold the server's configs and secrets: never push or share them; `bin/dev down --all` removes the images.
 
 ## Taking a task
 
