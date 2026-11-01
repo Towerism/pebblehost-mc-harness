@@ -222,6 +222,41 @@ test('the build context refuses committed symlinks', () => {
   assert.throws(() => buildContext(source(root), tmp()), /symlinks refused.*server\/link/);
 });
 
+test('the build context holds the committed bytes: replace refs are ignored, export-ignore and export-subst are refused', () => {
+  const root = gitRepo({ 'server/a.jar': '1', 'server/a.yml': 'name: bad\n', 'server/b.yml': 'v: $Format:%H$\n' });
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const g = (...args: string[]) => spawnSync('git', ['-C', root, ...args], { env, encoding: 'utf8' }).stdout.trim();
+  const good = spawnSync('git', ['-C', root, 'hash-object', '-w', '--stdin'], { env, input: 'name: good\n', encoding: 'utf8' }).stdout.trim();
+  g('replace', g('rev-parse', 'HEAD:server/a.yml'), good);
+  assert.equal(g('show', 'HEAD:server/a.yml'), 'name: good');
+  const ctx = tmp();
+  buildContext(source(root), ctx);
+  assert.equal(readFileSync(join(ctx, 'cfg/a.yml'), 'utf8'), 'name: bad\n');
+  // Local attributes that drop or rewrite files in git archive.
+  for (const [attr, why] of [['server/a.yml export-ignore\n', /\na\.yml: missing/], ['server/b.yml export-subst\n', /\nb\.yml: content differs/]] as const) {
+    write(root, { '.git/info/attributes': attr });
+    assert.throws(() => buildContext(source(root), tmp()), (e: Error) => /git archive of server\/ at [0-9a-f]{12} is not its tree/.test(e.message) && why.test(e.message), attr);
+  }
+});
+
+test('the build context accepts archive filters that map back to the tree: an LFS-like smudge/clean driver and eol=crlf', () => {
+  const root = gitRepo({ '.gitattributes': 'server/*.jar filter=fake\nserver/*.txt text eol=crlf\n' });
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const g = (...args: string[]) => spawnSync('git', ['-C', root, ...args], { env, encoding: 'utf8' });
+  // A pointer file in the repo, the real bytes in the checkout (like git-lfs).
+  g('config', 'filter.fake.smudge', 'sed s/^pointer/payload/');
+  g('config', 'filter.fake.clean', 'sed s/^payload/pointer/');
+  commitAll(root, { 'server/a.jar': 'payload 1\n', 'server/notes.txt': 'one\ntwo\n' });
+  assert.equal(g('show', 'HEAD:server/a.jar').stdout, 'pointer 1\n');
+  const ctx = tmp();
+  buildContext(source(root), ctx);
+  assert.equal(readFileSync(join(ctx, 'bin/a.jar'), 'utf8'), 'payload 1\n');
+  assert.equal(readFileSync(join(ctx, 'cfg/notes.txt'), 'utf8'), 'one\r\ntwo\r\n');
+  // export-ignore is still caught with the filters in place.
+  write(root, { '.git/info/attributes': 'server/notes.txt export-ignore\n' });
+  assert.throws(() => buildContext(source(root), tmp()), /\nnotes\.txt: missing/);
+});
+
 test('stepCached reads classic and BuildKit output', () => {
   const step = 'COPY --chown=1000:1000 bin ';
   assert.ok(stepCached('Step 3/9 : COPY --chown=1000:1000 bin /server/\n ---> Using cache\n ---> 1a2b\n', step));
@@ -239,6 +274,9 @@ test('build labels an archive image with its commit and source=archive', () => {
   assert.equal(built.id.commit.length, 40);
   for (const k of ['commit', 'tree', 'harness', 'image'] as const) assert.ok(args.includes(`mc-harness.${k}=${built.id[k]}`), k);
   assert.ok(args.includes('mc-harness.project=proj1234'));
+  // Another checkout with the same tree gets its own tag, never this image.
+  assert.equal(built.tag, `mc-dev:proj1234-${built.id.image}`);
+  assert.equal(build(source(root), recorder({ 'image inspect': { status: 1 } }).d, 'other123').tag, `mc-dev:other123-${built.id.image}`);
 });
 
 test('build labels a plain-copy image source=dir with an empty commit and a dir: tree', () => {
@@ -255,20 +293,20 @@ test('build labels a plain-copy image source=dir with an empty commit and a dir:
   assert.deepEqual(readdirSync(join(root, '.dev')), []);
 });
 
-test('pruneImages keeps the new image and images a container uses', () => {
+test('pruneImages keeps the new server and relay images and images a container uses', () => {
   const { d, calls } = recorder({
     'ps -a': 'mc-dev:inuse\n',
-    'image ls': 'mc-dev:new id1\nmc-dev:inuse id2\nmc-dev:old id3\nother:tag id4\n',
+    'image ls': 'mc-dev:new id1\nmc-dev:inuse id2\nmc-dev:old id3\nother:tag id4\nmc-relay:r1 id5\nmc-relay:r0 id6\n',
   });
-  assert.equal(pruneImages(d, 'proj1234', ['mc-dev:new']), 1);
-  assert.deepEqual(calls[2], ['image', 'rm', '-f', 'mc-dev:old']);
+  assert.equal(pruneImages(d, 'proj1234', ['mc-dev:new', 'mc-relay:r1']), 2);
+  assert.deepEqual(calls[2], ['image', 'rm', '-f', 'mc-dev:old', 'mc-relay:r0']);
   assert.ok(calls[1].includes('label=mc-harness.project=proj1234'));
 });
 
 test('createPod: internal IPv4-only network without a gateway, labelled volume, no published port', () => {
   const p = podOf(tmp(), 'dev');
   const { d, calls, envs } = recorder();
-  createPod(p, { tag: 'mc-dev:abc', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw' }, d);
+  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw' }, d);
   const labels = ['--label', `mc-harness.project=${p.project}`, '--label', 'mc-harness.pod=dev'];
   const prefix = `mc-${p.project}-dev`;
   assert.deepEqual(calls[0], ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labels, `${prefix}-net`]);
@@ -282,9 +320,20 @@ test('createPod: internal IPv4-only network without a gateway, labelled volume, 
   assert.deepEqual(envs[2], { RCON_PASSWORD: 'pw' });
   assert.equal(run.filter((a) => a === '--add-host').length, EGRESS_SINKS.length);
   assert.equal(run[run.length - 1], 'mc-dev:abc');
-  assert.equal(calls.length, 3);
+  // The relay: pod network only, tini, read-only as uid 1000, password from env.
+  const relay = calls[3];
+  assert.deepEqual(relay.slice(0, 8), ['run', '-d', '--name', `${prefix}-relay`, '--hostname', 'relay-dev', '--network', `${prefix}-net`]);
+  for (const pair of [labels.slice(0, 2), labels.slice(2), ['--init'], ['-e', 'RCON_PASSWORD'], ['-e', `RCON_HOST=${prefix}-server`], ['--user', '1000:1000'], ['--read-only'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '256']]) {
+    assert.ok(relay.join('\0').includes(pair.join('\0')), pair.join(' '));
+  }
+  assert.equal(relay.filter((a) => a === '--network').length, 1);
+  assert.ok(relay.some((a) => a.startsWith('/run:') && a.includes('uid=1000') && a.includes('noexec')));
+  assert.ok(!relay.some((a) => a.includes('pw') || a === '-p' || a.startsWith('--publish')), 'password or port in relay argv');
+  assert.deepEqual(envs[3], { RCON_PASSWORD: 'pw' });
+  assert.equal(relay[relay.length - 1], 'mc-relay:r1');
+  assert.equal(calls.length, 4);
   const mem = recorder();
-  createPod(p, { tag: 'mc-dev:abc', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', memory: '6g' }, mem.d);
+  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', memory: '6g' }, mem.d);
   assert.ok(mem.calls[2].join('\0').includes(['--memory', '6g'].join('\0')));
 });
 

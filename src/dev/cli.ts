@@ -4,13 +4,13 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail, must } from './docker.ts';
-import { build, chooseJar, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
+import { build, buildRelay, chooseJar, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
 import { bootTimeout, createJoin, createPod, formatBootReport, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
 
 const USAGE = `usage: dev <command> [--pod ID] [options]
 
   up [--fixtures DIR]... [--jar NAME] [--heap SIZE]
-                          build mc-dev:<imageHash> from the committed server/
+                          build mc-dev:<project>-<imageHash> from the committed server/
                           and boot the pod; refuses uncommitted server/ changes
   rebuild [same options]  rebuild from HEAD, then recreate container and volume
   restart                 restart the container on the same image; state kept
@@ -23,6 +23,8 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
                           compared with LOG (default server/logs/latest.log)
   join [--port N] [--stop]
                           proxy 127.0.0.1:N (default 25565) to the server
+  console <command...>    run a server command over RCON through the pod's
+                          relay and print its reply
 
 --pod defaults to dev. --jar picks the server jar when server/ has several
 at its root; --heap sets -Xms/-Xmx (both are kept for rebuild). --timeout S
@@ -30,15 +32,21 @@ bounds each boot (default 3x the median of the pod's last boots, or 600s).
 server/ comes from $MC_HOME (default: the harness root): git archive of HEAD
 when server/ is tracked, else a plain copy. Exit codes: 0 ok, 2 error.`;
 
-type Opts = { pod: string; fixtures: string[]; timeout?: number; port: number; all: boolean; follow: boolean; tail?: string; stop: boolean; jar?: string; heap?: string; against?: string };
+type Opts = { words: string[]; pod: string; fixtures: string[]; timeout?: number; port: number; all: boolean; follow: boolean; tail?: string; stop: boolean; jar?: string; heap?: string; against?: string };
 
 function parse(argv: string[]): { cmd: string; o: Opts } {
-  const o: Opts = { pod: 'dev', fixtures: [], port: 25565, all: false, follow: false, stop: false };
+  const o: Opts = { words: [], pod: 'dev', fixtures: [], port: 25565, all: false, follow: false, stop: false };
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '-h' || cmd === '--help') fail(USAGE);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     const val = () => rest[++i] ?? fail(`${a} needs a value\n${USAGE}`);
+    // console: options first; the first other word (or what follows --)
+    // starts the server command, kept verbatim.
+    if (cmd === 'console' && (a === '--' || !a.startsWith('-'))) {
+      o.words = rest.slice(a === '--' ? i + 1 : i);
+      break;
+    }
     if (a === '--pod') o.pod = val();
     else if (a === '--fixtures') o.fixtures.push(resolve(val()));
     else if (a === '--timeout') o.timeout = Number(val());
@@ -80,6 +88,7 @@ function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean
   const jar = chooseJar(src, pf.jar);
   const t0 = Date.now();
   const built = build(src, d, p.project);
+  const relayTag = buildRelay(d, p.project, p.root);
   const took = ((Date.now() - t0) / 1000).toFixed(1);
   say(built.cacheHit ? `image: cache hit ${built.tag}` : `image: built ${built.tag} in ${took}s (jar layer ${built.jarLayerCached ? 'cached' : 'rebuilt'})`);
   for (const note of built.notes) say(`override: ${note}`);
@@ -91,10 +100,10 @@ function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean
   chmodSync(join(n.dir, 'pod.json'), 0o600);
   const since = Date.now() / 1000;
   const javaOpts = process.env.MC_JAVA_OPTS || (pf.heap ? `-Xms${pf.heap} -Xmx${pf.heap}` : undefined);
-  const spec = { tag: built.tag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), javaOpts, memory: process.env.MC_DEV_MEMORY };
+  const spec = { tag: built.tag, relayTag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), javaOpts, memory: process.env.MC_DEV_MEMORY };
   createPod(p, spec, d);
   const secs = waitBoot(p, since, timeout);
-  const pruned = pruneImages(d, p.project, [built.tag]);
+  const pruned = pruneImages(d, p.project, [built.tag, relayTag]);
   const from = built.id.source === 'archive' ? `commit ${built.id.commit}` : 'plain server/ copy, not a commit';
   say(`up: pod ${p.pod} done in ${secs}s (${from}, ${jar}, image ${built.id.image.slice(0, 12)}${pruned ? `, ${pruned} old image(s) removed` : ''})`);
 }
@@ -171,6 +180,24 @@ function main(argv: string[]) {
       if (state(d, n.join) !== null) fail(`join proxy already running; bin/dev join --stop first`);
       createJoin(p, o.port, SOCAT_IMAGE, d);
       say(`join: connect to 127.0.0.1:${o.port}`);
+      break;
+    }
+    case 'console': {
+      const command = o.words.join(' ');
+      if (command.trim() === '') fail(`console needs a server command\n${USAGE}`);
+      const st = state(d, requireServer(p));
+      if (st !== 'running') fail(`server of pod ${p.pod} is ${st}; run bin/dev restart`);
+      const rst = state(d, n.relay);
+      if (rst !== 'running') fail(`relay of pod ${p.pod} is ${rst ?? 'missing'}; bin/dev rebuild recreates it`);
+      const r = d(['exec', '-i', n.relay, 'node', '/relay/client.ts'], { input: `${JSON.stringify({ op: 'console', command })}\n` });
+      let reply: { ok?: boolean; reply?: string; error?: string } = {};
+      try {
+        reply = JSON.parse(r.stdout);
+      } catch {
+        fail(`relay gave no reply: ${(r.stderr || r.stdout).trim()}`);
+      }
+      if (reply.ok !== true || typeof reply.reply !== 'string') fail(reply.error ?? `relay reply without output: ${r.stdout.trim()}`);
+      process.stdout.write(reply.reply === '' || reply.reply.endsWith('\n') ? reply.reply : `${reply.reply}\n`);
       break;
     }
     default:

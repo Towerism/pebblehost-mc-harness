@@ -4,8 +4,8 @@ import { spawnSync } from 'node:child_process';
 
 export type Result = { status: number; stdout: string; stderr: string };
 // env: extra variables for the docker client, for values that must stay out
-// of argv (`-e NAME` without a value reads them from here).
-export type Docker = (args: string[], opts?: { inherit?: boolean; env?: Record<string, string> }) => Result;
+// of argv (`-e NAME` without a value reads them from here). input: stdin.
+export type Docker = (args: string[], opts?: { inherit?: boolean; env?: Record<string, string>; input?: string }) => Result;
 
 export class DevError extends Error {}
 
@@ -19,7 +19,8 @@ export const docker: Docker = (args, opts = {}) => {
     encoding: 'utf8',
     env: { ...process.env, ...opts.env },
     maxBuffer: 1 << 30,
-    stdio: opts.inherit ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'pipe', 'pipe'],
+    input: opts.input,
+    stdio: [opts.input === undefined ? 'ignore' : 'pipe', ...(opts.inherit ? (['inherit', 'inherit'] as const) : (['pipe', 'pipe'] as const))],
   });
   if (r.error) fail(`cannot run docker: ${r.error.message}`);
   return { status: r.status ?? 2, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };

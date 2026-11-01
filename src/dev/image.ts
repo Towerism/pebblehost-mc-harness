@@ -11,6 +11,8 @@ import { applyOverrides } from './overrides.ts';
 export const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
 // What the harness puts into an image besides the server tree.
 export const HARNESS_INPUTS = ['docker/server.Dockerfile', 'docker/entrypoint.sh', 'src/dev/overrides.ts'];
+// What goes into the relay image; their hash is its tag.
+export const RELAY_INPUTS = ['docker/relay.Dockerfile', 'src/relay/daemon.ts', 'src/relay/client.ts', 'src/relay/rcon.ts'];
 
 export type Source = { kind: 'git'; root: string; commit: string } | { kind: 'dir'; root: string };
 // source=archive images come from a commit; source=dir images from a plain
@@ -20,13 +22,15 @@ export type Identity = { source: 'archive' | 'dir'; commit: string; tree: string
 
 const sha256 = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
 
-export function git(root: string, args: string[]): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 30, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
+// Every harness git call ignores replace refs (git replace), which would make
+// a commit's tree read as other bytes.
+export function git(root: string, args: string[], opts: { env?: Record<string, string>; input?: string } = {}): { status: number; stdout: string; stderr: string } {
+  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 30, input: opts.input, env: { ...process.env, ...opts.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   return { status: r.status ?? 2, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
-function mustGit(root: string, args: string[]): string {
-  const r = git(root, args);
+function mustGit(root: string, args: string[], opts: { env?: Record<string, string>; input?: string } = {}): string {
+  const r = git(root, args, opts);
   if (r.status !== 0) fail(`git ${args.join(' ')} failed: ${r.stderr.trim()}`);
   return r.stdout.trim();
 }
@@ -43,6 +47,38 @@ export function walk(dir: string, rel = ''): string[] {
     else if (st.isFile()) out.push(path);
   }
   return out;
+}
+
+// How the extracted files of `<commit>:<prefix>` differ from that tree, one
+// line per path: missing, extra, mode, or content. A file whose raw bytes
+// differ is hashed again through the repo's clean filters and eol rules
+// (--path), which map archive output (LFS smudge, eol=crlf) back to the
+// stored blob; export-ignore and export-subst still show as differences.
+export function treeDiff(root: string, commit: string, prefix: string, dir: string): string[] {
+  const want = new Map<string, { mode: string; blob: string }>();
+  for (const e of mustGit(root, ['ls-tree', '-r', '-z', '--full-tree', commit, '--', prefix]).split('\0').filter(Boolean)) {
+    const [meta, path] = [e.slice(0, e.indexOf('\t')), e.slice(e.indexOf('\t') + 1)];
+    const [mode, , blob] = meta.split(' ');
+    want.set(path.slice(prefix.length + 1), { mode, blob });
+  }
+  const files = walk(dir);
+  if (files.some((f) => f.includes('\n'))) fail(`a file name with a newline in ${dir}`);
+  const out: string[] = [];
+  const have = new Set(files);
+  for (const rel of want.keys()) if (!have.has(rel)) out.push(`${rel}: missing`);
+  const both = files.filter((f) => {
+    if (want.has(f)) return true;
+    out.push(`${f}: not in the tree`);
+    return false;
+  });
+  const raw = both.length === 0 ? [] : mustGit(root, ['hash-object', '--no-filters', '--stdin-paths'], { input: `${both.map((f) => join(dir, f)).join('\n')}\n` }).split('\n');
+  both.forEach((f, i) => {
+    const w = want.get(f) as { mode: string; blob: string };
+    const mode = statSync(join(dir, f)).mode & 0o100 ? '100755' : '100644';
+    if (mode !== w.mode) out.push(`${f}: mode ${mode}, not ${w.mode}`);
+    if (raw[i] !== w.blob && mustGit(root, ['hash-object', `--path=${prefix}/${f}`, join(dir, f)]) !== w.blob) out.push(`${f}: content differs`);
+  });
+  return out.sort();
 }
 
 // sha256 over every file's path, mode and content.
@@ -130,6 +166,10 @@ export function buildContext(src: Source, ctx: string, harnessRoot = HARNESS_ROO
     if (tar.status !== 0) fail(`tar failed: ${tar.stderr}`);
     rmSync(join(ctx, 'server.tar'));
     base = join(ctx, 'server');
+    // git archive applies export-ignore and export-subst from .gitattributes
+    // and .git/info/attributes: the extracted files must still be the tree.
+    const diff = treeDiff(src.root, src.commit, 'server', base);
+    if (diff.length > 0) fail(`git archive of server/ at ${src.commit.slice(0, 12)} is not its tree (export-ignore or export-subst in .gitattributes or .git/info/attributes?):\n${diff.slice(0, 20).join('\n')}${diff.length > 20 ? `\n... ${diff.length - 20} more` : ''}`);
   } else {
     base = join(src.root, 'server');
   }
@@ -170,9 +210,12 @@ export function stepCached(output: string, step: string): boolean {
 
 export type Built = { tag: string; id: Identity; cacheHit: boolean; jarLayerCached: boolean; notes: string[] };
 
+// The tag carries the project: two checkouts with the same server tree would
+// otherwise share one tag, and a build in one would retag (and relabel, with
+// its own commit) the image the other is about to run.
 export function build(src: Source, d: Docker, project: string, harnessRoot = HARNESS_ROOT): Built {
   const id = identity(src, harnessRoot);
-  const tag = `mc-dev:${id.image}`;
+  const tag = `mc-dev:${project}-${id.image}`;
   if (d(['image', 'inspect', tag]).status === 0) return { tag, id, cacheHit: true, jarLayerCached: true, notes: [] };
   const ctx = mkdtempSync(join(privateDir(join(src.root, '.dev')), 'build-'));
   try {
@@ -184,6 +227,28 @@ export function build(src: Source, d: Docker, project: string, harnessRoot = HAR
     if (r.status !== 0) fail(`docker build failed:\n${(r.stdout + r.stderr).split('\n').slice(-30).join('\n')}`);
     const checked = verifyOverrides(d, tag, join(ctx, 'ovr'));
     return { tag, id, cacheHit: false, jarLayerCached: stepCached(r.stdout + r.stderr, 'COPY --chown=1000:1000 bin '), notes: [...notes, `${checked} overridden file(s) verified in the image`] };
+  } finally {
+    rmSync(ctx, { recursive: true, force: true });
+  }
+}
+
+// The relay image, mc-relay:<project>-<hash of RELAY_INPUTS>, built once per
+// change to them. It holds no server files; the project keeps each
+// checkout's down --all and prune to its own image.
+export function buildRelay(d: Docker, project: string, root: string, harnessRoot = HARNESS_ROOT): string {
+  const h = createHash('sha256');
+  for (const f of RELAY_INPUTS) h.update(`${f}\n${sha256(readFileSync(join(harnessRoot, f)))}\n`);
+  const tag = `mc-relay:${project}-${h.digest('hex')}`;
+  if (d(['image', 'inspect', tag]).status === 0) return tag;
+  const ctx = mkdtempSync(join(privateDir(join(root, '.dev')), 'relay-'));
+  try {
+    mkdirSync(join(ctx, 'relay'));
+    for (const f of RELAY_INPUTS.slice(1)) cpSync(join(harnessRoot, f), join(ctx, 'relay', f.split('/').pop() as string));
+    writeFileSync(join(ctx, 'relay', 'package.json'), '{"type":"module"}\n');
+    cpSync(join(harnessRoot, RELAY_INPUTS[0]), join(ctx, 'Dockerfile'));
+    const r = d(['build', '-f', join(ctx, 'Dockerfile'), '-t', tag, '--label', `mc-harness.project=${project}`, ctx]);
+    if (r.status !== 0) fail(`docker build of the relay failed:\n${(r.stdout + r.stderr).split('\n').slice(-30).join('\n')}`);
+    return tag;
   } finally {
     rmSync(ctx, { recursive: true, force: true });
   }
@@ -212,14 +277,15 @@ export function privateDir(dir: string): string {
   return dir;
 }
 
-// Remove the project's mc-dev images except `keep` and those a container
-// still uses: they hold server configs and secrets. Returns how many went.
+// Remove the project's mc-dev and mc-relay images except `keep` and those a
+// container still uses: mc-dev ones hold server configs and secrets. Returns
+// how many went.
 export function pruneImages(d: Docker, project: string, keep: string[]): number {
   const used = new Set(must(d, ['ps', '-a', '--filter', `label=mc-harness.project=${project}`, '--format', '{{.Image}}']).split('\n').filter(Boolean));
   const imgs = must(d, ['image', 'ls', '--filter', `label=mc-harness.project=${project}`, '--format', '{{.Repository}}:{{.Tag}} {{.ID}}']).split('\n').filter(Boolean);
   const gone = imgs.filter((l) => {
     const [ref, id] = l.split(' ');
-    return ref.startsWith('mc-dev:') && !keep.includes(ref) && !used.has(ref) && !used.has(id);
+    return /^mc-(dev|relay):/.test(ref) && !keep.includes(ref) && !used.has(ref) && !used.has(id);
   });
   if (gone.length > 0) must(d, ['image', 'rm', '-f', ...gone.map((l) => l.split(' ')[0])]);
   return gone.length;
