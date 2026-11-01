@@ -31,8 +31,8 @@ export function envFile(root: string): string {
 
 // bin/mc with its own MC_HOME and the project's .env; one rclone retry, so a
 // file live rewrites mid-copy fails the pull instead of re-downloading it all.
-export function mc(home: string, root: string, args: string[], exclude?: string): { status: number; out: string } {
-  const env: Record<string, string | undefined> = { ...process.env, MC_HOME: home, MC_ENV_FILE: envFile(root), RCLONE_RETRIES: '1', MC_EXCLUDE_FILE: exclude };
+export function mc(home: string, root: string, args: string[], exclude?: string, extra: Record<string, string> = {}): { status: number; out: string } {
+  const env: Record<string, string | undefined> = { ...process.env, MC_HOME: home, MC_ENV_FILE: envFile(root), RCLONE_RETRIES: '1', MC_EXCLUDE_FILE: exclude, ...extra };
   if (!exclude) delete env.MC_EXCLUDE_FILE;
   const r = spawnSync(join(HARNESS_ROOT, 'bin/mc'), args, { encoding: 'utf8', env, maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'] });
   return { status: r.status ?? 2, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };

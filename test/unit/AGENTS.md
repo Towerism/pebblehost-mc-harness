@@ -11,6 +11,7 @@ Unit tests for `bin/mc`: `.env` parsing, the mapping to rclone variables, path s
 |------|-------------|
 | `mc.bats` | The unit tests; `setup` writes a `.env` with a password containing `$` and quotes |
 | `guard.bats` | Path-guard hooks, `bin/install-hooks` and `bin/path-guard` against a temp git repo whose `hooks/` is an untracked symlink to this repo's (plus a bare `origin`, a superproject or a worktree where needed); global git config is ignored |
+| `private.bats` | The private repo rails: the `MC_RUNBOOK` guard in `bin/mc` (from a real `harness/` submodule of a temp `.harness-private` superproject, and via `MC_HOME`), the template's root wrappers (`bin/mc pull` refused outside `.dev/`), `hooks/private-pre-push` hosts (backslash and userinfo tricks refused), `bin/mc` taking a `-` path after `--`, and the template `make test` refusing without hooks |
 
 ## Subdirectories
 | Directory | Purpose |

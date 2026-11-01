@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# The private server repo's pre-push hook: refuse any remote that is not the
+# private Gitea host, so server files never reach GitHub or anywhere else.
+# The private repo's `make hooks` links it as .git/hooks/pre-push. Git passes
+# the remote name and URL as arguments.
+set -euo pipefail
+
+allowed=vcs.martinfrackerjr.com
+url=${2:-}
+
+# Strictly scheme://[user@]host[:port]/path or scp-like [user@]host:path,
+# with a plain host name; a backslash or a stray @ makes it no host at all.
+host=
+if [[ $url != *\\* ]]; then
+  if [[ $url =~ ^(ssh|https?|git)://([A-Za-z0-9._~-]+@)?([A-Za-z0-9.-]+)(:[0-9]+)?/[^@]*$ ]]; then
+    host=${BASH_REMATCH[3]}
+  elif [[ $url != *://* && $url =~ ^([A-Za-z0-9._~-]+@)?([A-Za-z0-9.-]+):[^@]*$ ]]; then
+    host=${BASH_REMATCH[2]}
+  fi
+fi
+
+if [[ ${host,,} != "$allowed" ]]; then
+  echo "pre-push: refused: ${1:-remote} ($url) is not on $allowed; the private server repo pushes only to its Gitea" >&2
+  exit 2
+fi

@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DevError, docker as d, fail } from '../dev/docker.ts';
-import { HARNESS_ROOT, labels, privateDir } from '../dev/image.ts';
+import { git, HARNESS_ROOT, labels, privateDir } from '../dev/image.ts';
 import { isExplored, killOrphanSuite, names, podOf, RUN_LOG, state, suitePidFile } from '../dev/pod.ts';
 import { parseBareText } from '../gate/bareText.ts';
 import { writeDoc } from '../gate/docs.ts';
@@ -15,6 +15,7 @@ import { readProfile } from './profile.ts';
 import { runCheck, sweepLiveRuns, type Target } from './run.ts';
 import { runSuite, teardownSuitePods } from './suite.ts';
 import { formatTimings } from './timings.ts';
+import { runbookPush, runbookRollback } from '../sync/runbookPush.ts';
 
 const USAGE = `usage: check <command> <id> [options]
 
@@ -33,6 +34,13 @@ const USAGE = `usage: check <command> <id> [options]
   postmortem <id>         write docs/postmortems/<date>-<N>-<slug>.md
   runbook <id>            write docs/runbooks/<date>-<N>-<slug>.md
                           (both only after a confirmed gate pass)
+  runbook push N [--plan] upload the server/ files of main...issue/N to live:
+                          each is pulled into .dev/runbook-N/home and must
+                          still be main's version (refused on drift), then
+                          pushed with a backup and a journal line, stopping at
+                          the first failure; --plan prints the set and diffs
+                          and writes nothing; needs the committed runbook
+  runbook rollback N      print the restore commands for the last push run
   suite [--jar NAME] [--heap SIZE] [--timeout S] [--target dev|live]
                           every committed check: bare-text first, then one pod
                           per fixture profile, torn down after; prints and
@@ -45,16 +53,18 @@ checks/<id>/profile.json gives the kind: {"kind": "e2e"} or {"kind":
 or --issue N. The project is $MC_HOME (default: the harness root).
 Exit codes: 0 passed, 1 failed (recorded), 2 refused.`;
 
-type Opts = { id?: string; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number; jar?: string; heap?: string; target: Target };
+type Opts = { id?: string; sub?: 'push' | 'rollback'; plan: boolean; issue?: string; pod: string; fresh: boolean; confirm: boolean; timeout: number; jar?: string; heap?: string; target: Target };
 
 function parse(argv: string[]): { cmd: string; o: Opts } {
-  const o: Opts = { pod: 'dev', fresh: false, confirm: true, timeout: 600, target: 'dev' };
+  const o: Opts = { plan: false, pod: 'dev', fresh: false, confirm: true, timeout: 600, target: 'dev' };
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '-h' || cmd === '--help') fail(USAGE);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     const val = () => rest[++i] ?? fail(`${a} needs a value\n${USAGE}`);
-    if (a === '--issue') o.issue = val();
+    if (cmd === 'runbook' && o.id === undefined && o.sub === undefined && (a === 'push' || a === 'rollback')) o.sub = a;
+    else if (a === '--plan') o.plan = true;
+    else if (a === '--issue') o.issue = val();
     else if (a === '--pod') o.pod = val();
     else if (a === '--timeout') o.timeout = Number(val());
     else if (a === '--fresh') o.fresh = true;
@@ -92,6 +102,28 @@ function bareTextOf(root: string, id: string): { staticProblems: string[]; bareF
     bareFiles.push(...files);
   }
   return { staticProblems, bareFiles: [...new Set(bareFiles)] };
+}
+
+// A gate pass of check id whose confirm run is committed as is: what
+// postmortem, runbook and runbook push need (G1-G10 and the confirm).
+function confirmedPass(root: string, cmd: string, id: string, issue: number): { v: Verdict & { kind: Kind } & { ok: true }; confirm: RunRecord; records: RunRecord[] } {
+  const records = readRecords(root, issue);
+  const v = verdict(root, id, issue, records);
+  if (!v.ok) fail(`${cmd}: the gate refuses ${id}:\n  ${v.reasons.join('\n  ')}`);
+  const { confirm, why } = confirmCheck(records, v.green);
+  if (!confirm) fail(`${cmd}: the green of ${id} is not confirmed (${why}); run bin/dev rebuild, then bin/check gate ${id}`);
+  if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
+  return { v, confirm, records };
+}
+
+// runbook push N: the project is on issue/N and every committed check of the
+// issue (checks/N-*) holds a confirmed, committed gate pass.
+function gatedIssue(root: string, n: number): void {
+  const head = git(root, ['symbolic-ref', '--short', '-q', 'HEAD']).stdout.trim();
+  if (head !== `issue/${n}`) fail(`runbook push ${n}: check out issue/${n} first (on ${head || 'a detached HEAD'}); the gate reads its records there`);
+  const ids = git(root, ['ls-tree', '-d', '--name-only', 'HEAD', 'checks/']).stdout.split('\n').map((l) => l.slice('checks/'.length)).filter((id) => id.startsWith(`${n}-`));
+  if (ids.length === 0) fail(`runbook push ${n}: issue/${n} has no committed checks/${n}-*; a push needs a gate pass`);
+  for (const id of ids) confirmedPass(root, `runbook push ${n}`, id, n);
 }
 
 function verdict(root: string, id: string, issue: number, records: RunRecord[]): Verdict & { kind: Kind } {
@@ -191,6 +223,14 @@ function main(argv: string[]) {
     process.exitCode = failed.length > 0 ? 1 : 0;
     return;
   }
+  if (o.sub) {
+    const n = Number(o.id);
+    if (!Number.isInteger(n) || n <= 0) fail(`runbook ${o.sub} needs an issue number\n${USAGE}`);
+    if (o.sub === 'push') runbookPush(root, n, o.plan, () => gatedIssue(root, n));
+    else say(runbookRollback(root, n).join('\n'));
+    return;
+  }
+  if (o.plan) fail(`--plan is for runbook push\n${USAGE}`);
   if (o.id === undefined) fail(`${cmd} needs a check id\n${USAGE}`);
   if ((cmd === 'run' || cmd === 'gate') && process.env.MC_RUN_CHILD !== '1') {
     runParent(root, argv);
@@ -239,12 +279,7 @@ function main(argv: string[]) {
     }
     case 'postmortem':
     case 'runbook': {
-      const records = readRecords(root, issue);
-      const v = verdict(root, o.id, issue, records);
-      if (!v.ok) fail(`${cmd}: the gate refuses ${o.id}:\n  ${v.reasons.join('\n  ')}`);
-      const { confirm, why } = confirmCheck(records, v.green);
-      if (!confirm) fail(`${cmd}: the green of ${o.id} is not confirmed (${why}); run bin/dev rebuild, then bin/check gate ${o.id}`);
-      if (!gitRepo(root).committedRuns(issue).has(JSON.stringify(confirm))) fail(`${cmd}: the confirm record of ${o.id} is not committed as is in .verify/runs/issue-${issue}.jsonl; commit it first (G10)`);
+      const { v, confirm, records } = confirmedPass(root, cmd, o.id, issue);
       const live = records.filter((r) => r.check === o.id && r.target === 'live').at(-1);
       say(`${cmd}: wrote ${writeDoc(root, cmd, v.red, v.green, confirm, live)}`);
       break;

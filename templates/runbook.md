@@ -7,6 +7,6 @@ Run these steps in order and stop at the first one that fails. The user OKs the 
 1. **Sync and drift check.** Run `bin/dev sync`. It must report no drift on the files of step 2 since `issue/{{issue}}` was cut from `{{base}}`.
 2. **Files to push.** The `server/` changes of `{{base}}...issue/{{issue}}`:
 {{files}}
-3. **Push.** Run `bin/check runbook push {{issue}}`. It uploads exactly the files of step 2 and refuses on drift.
+3. **Push.** Run `bin/check runbook push {{issue}} --plan` and show the user the files and diffs it prints. After their OK, run `bin/check runbook push {{issue}}`. It uploads exactly the files of step 2, refuses on drift on `main` or live, and journals each file with its backup. If it fails midway, `bin/check runbook rollback {{issue}}` prints the restore commands.
 4. **Apply.** <!-- The plugin's reload command, or "restart from the panel". -->
 5. **Live check, read-only.** Run `bin/check run {{check}} --target live --issue {{issue}}`. It must pass, and it is recorded with target=live.

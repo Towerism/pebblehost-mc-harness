@@ -1,0 +1,2 @@
+This file marks the private server repo. harness/bin/mc refuses a bare push
+here: live writes go through bin/check runbook push N.
