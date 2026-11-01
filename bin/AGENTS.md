@@ -19,6 +19,7 @@ The `mc` command: list, pull, diff and push the server's files over SFTP.
 - Exit codes: 0 ok, 1 `diff` found differences, 2 error (`die`). Keep that split.
 - The password must never reach argv, output or any written file.
 - Push safety relies on: the remote listing recorded *before* the pull's copy; the listing compared again before upload; the remote copy saved to `backups/<ts>/remote/` before upload; `--ignore-times` on transfers (SFTP modtimes have 1-second precision).
+- The push upload alone uses `--inplace`: PebbleHost's SFTP refuses renaming rclone's `.partial` file over the target. Pull, diff and the backup download stay atomic.
 
 ### Testing Requirements
 `make lint test-unit test-integration`. A new behaviour gets a unit test in `test/unit/mc.bats`, and an integration test when it touches real SFTP semantics.

@@ -169,7 +169,7 @@ ENV
   run "$mc" push plugins/a.yml
   [ "$status" -eq 2 ]
   [[ $output == *"changed since the last pull"* ]]
-  run ! grep -q "copyto --ignore-times $MC_HOME/server" "$STUB_LOG"
+  run ! grep -q "copyto --inplace --ignore-times $MC_HOME/server" "$STUB_LOG"
 }
 
 @test "push backs up the remote copy before uploading" {
@@ -178,8 +178,19 @@ ENV
   run "$mc" push plugins/a.yml
   [ "$status" -eq 0 ]
   backup_line=$(grep -n "copyto pebble:plugins/a.yml $MC_HOME/backups/" "$STUB_LOG" | cut -d: -f1)
-  upload_line=$(grep -n "copyto --ignore-times $MC_HOME/server/plugins/a.yml pebble:plugins/a.yml" "$STUB_LOG" | cut -d: -f1)
+  upload_line=$(grep -n "copyto --inplace --ignore-times $MC_HOME/server/plugins/a.yml pebble:plugins/a.yml" "$STUB_LOG" | cut -d: -f1)
   [ -n "$backup_line" ] && [ -n "$upload_line" ] && [ "$backup_line" -lt "$upload_line" ]
+}
+
+# PebbleHost's SFTP server refuses rclone's rename of a .partial upload over the target.
+@test "push uploads in place; downloads stay atomic" {
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  "$mc" diff plugins/a.yml || true
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--inplace' "$STUB_LOG")" -eq 1 ]
+  grep -qx "rclone copyto --inplace --ignore-times $MC_HOME/server/plugins/a.yml pebble:plugins/a.yml" "$STUB_LOG"
 }
 
 @test "unknown command prints usage" {
