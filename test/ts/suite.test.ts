@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dev } from '../../src/check/dev.ts';
-import { isData, readProfile, type Profile } from '../../src/check/profile.ts';
+import { isData, readProfile, sqliteFixtures, type Profile } from '../../src/check/profile.ts';
 import { checkEnv } from '../../src/check/run.ts';
 import { planSuite, teardownSuitePods, type SuiteCheck } from '../../src/check/suite.ts';
 import type { Docker } from '../../src/dev/docker.ts';
@@ -15,7 +15,7 @@ import { formatTimings, readBudget, type Timings } from '../../src/check/timings
 import { join } from 'node:path';
 import { check, project, tmp, write } from './project.ts';
 
-const P = (o: Partial<Profile> = {}): Profile => ({ kind: 'e2e', fixtures: [], data: [], needs: [], restart: false, exclusive: false, ...o });
+const P = (o: Partial<Profile> = {}): Profile => ({ kind: 'e2e', fixtures: [], data: [], needs: [], restart: false, exclusive: false, sqlite: {}, ...o });
 const C = (id: string, o: Partial<Profile> = {}, fixturesHash = 'none', hasData = false): SuiteCheck => ({ id, profile: P(o), fixturesHash, hasData });
 
 test('readProfile fills defaults and refuses anything malformed', () => {
@@ -31,6 +31,30 @@ test('readProfile fills defaults and refuses anything malformed', () => {
     ['{"kind":"e2e","restart":"yes"}', /restart and exclusive must be true or false/],
     ['{"kind":"bare-text","fixtures":["f"]}', /a bare-text check takes no fixtures/],
     ['[]', /not an object/],
+  ];
+  for (const [json, re] of bad) {
+    write(root, { 'checks/b/profile.json': json });
+    assert.throws(() => readProfile(root, 'b'), re, json);
+  }
+});
+
+test('readProfile: sqlite maps server database paths to SQL files in the check', () => {
+  const root = tmp();
+  write(root, { 'checks/a/profile.json': '{"kind":"e2e","sqlite":{"plugins/E/data.db":"economy.sql","x.sqlite3":"sql/x.sql"}}', 'checks/a/economy.sql': '', 'checks/a/sql/x.sql': '' });
+  const p = readProfile(root, 'a');
+  assert.deepEqual(p.sqlite, { 'plugins/E/data.db': 'economy.sql', 'x.sqlite3': 'sql/x.sql' });
+  assert.deepEqual(sqliteFixtures(root, 'a', p), { 'plugins/E/data.db': join(root, 'checks/a/economy.sql'), 'x.sqlite3': join(root, 'checks/a/sql/x.sql') });
+  write(root, { 'checks/c/profile.json': '{"kind":"e2e","sqlite":{"d.db":"missing.sql"}}' });
+  assert.throws(() => sqliteFixtures(root, 'c', readProfile(root, 'c')), /sqlite missing\.sql is not a file in the check/);
+  const bad: [string, RegExp][] = [
+    ['{"kind":"e2e","sqlite":["a.db"]}', /sqlite must map database paths to SQL files/],
+    ['{"kind":"e2e","sqlite":{"a.db":1}}', /sqlite must map database paths to SQL files/],
+    ['{"kind":"e2e","sqlite":{"/abs.db":"a.sql"}}', /sqlite key \/abs\.db must be a server path relative to the root ending \.db, \.sqlite or \.sqlite3/],
+    ['{"kind":"e2e","sqlite":{"../a.db":"a.sql"}}', /sqlite key \.\.\/a\.db must be/],
+    ['{"kind":"e2e","sqlite":{"plugins/E/data.yml":"a.sql"}}', /sqlite key plugins\/E\/data\.yml must be/],
+    ['{"kind":"e2e","sqlite":{"a.db":"../a.sql"}}', /sqlite value \.\.\/a\.sql must be a path relative to the check/],
+    ['{"kind":"e2e","sqlite":{"a.db":""}}', /sqlite value  must be a path relative to the check/],
+    ['{"kind":"bare-text","sqlite":{"a.db":"a.sql"}}', /a bare-text check takes no fixtures, data, needs, restart, exclusive or sqlite/],
   ];
   for (const [json, re] of bad) {
     write(root, { 'checks/b/profile.json': json });

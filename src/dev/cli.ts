@@ -125,7 +125,7 @@ export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: 
   for (const note of built.notes) say(`override: ${note}`);
   const n = names(p);
   for (const dir of [join(p.root, '.dev'), join(p.root, '.dev', 'pods'), n.dir]) privateDir(dir);
-  const fixturesHash = mergeFixtures(pf.fixtures, join(n.dir, 'fixtures'));
+  const fixturesHash = mergeFixtures(pf.fixtures, join(n.dir, 'fixtures'), pf.sqlite);
   if (replace) removePod(p, false, d);
   writeFileSync(join(n.dir, 'pod.json'), `${JSON.stringify(pf)}\n`, { mode: 0o600 });
   chmodSync(join(n.dir, 'pod.json'), 0o600);
@@ -148,10 +148,12 @@ function waitBoot(p: Pod, since: number, timeout: number | undefined): number {
   return secs;
 }
 
-// Options given on the command line win over the pod's saved ones.
+// Options given on the command line win over the pod's saved ones; --fixtures
+// replaces the saved sqlite fixtures (from bin/check run --fresh) too.
 function podFile(p: Pod, o: Opts, saved: boolean): PodFile {
-  const prev = saved ? readPodFile(p) : { fixtures: [] };
-  return { fixtures: o.fixtures.length > 0 ? o.fixtures : prev.fixtures, jar: o.jar ?? prev.jar, heap: o.heap ?? prev.heap };
+  const prev: PodFile = saved ? readPodFile(p) : { fixtures: [] };
+  const fx = o.fixtures.length > 0 ? { fixtures: o.fixtures } : { fixtures: prev.fixtures, sqlite: prev.sqlite };
+  return { ...fx, jar: o.jar ?? prev.jar, heap: o.heap ?? prev.heap };
 }
 
 function main(argv: string[]) {

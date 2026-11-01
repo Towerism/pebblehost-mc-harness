@@ -9,7 +9,7 @@ import { boot } from '../dev/cli.ts';
 import { fail, type Docker } from '../dev/docker.ts';
 import { dirtyHarness, dirtyServer, git, labels, privateDir, source, toolHash } from '../dev/image.ts';
 import { isExplored, logRun, names, podOf, readPodFile, relayRequest, runPosition, state, type Pod } from '../dev/pod.ts';
-import { fixtureDirs, readProfile, type Profile } from './profile.ts';
+import { fixtureDirs, readProfile, sqliteFixtures, type Profile } from './profile.ts';
 import { LIVE_CHANGED, LIVE_SKIP } from './live.ts';
 import { appendRecord, type RunRecord } from './record.ts';
 
@@ -176,7 +176,7 @@ export function runCheck(o: RunOpts, d: Docker): Run {
     id = { source: 'live', commit: src.kind === 'git' ? src.commit : '', treeHash: '', harnessHash: '', imageHash: '', fixturesHash: '', generation: '', fresh: false, explored: false, containerId: '', runIndex: 0, concurrent: false };
   } else if (kind === 'e2e') {
     // A fresh volume carries the check's own fixtures.
-    if (o.fresh) boot(p, { ...readPodFile(p), fixtures: fixtureDirs(o.root, o.id, profile) }, undefined, true, true);
+    if (o.fresh) boot(p, { ...readPodFile(p), fixtures: fixtureDirs(o.root, o.id, profile), sqlite: sqliteFixtures(o.root, o.id, profile) }, undefined, true, true);
     const server = names(p).server;
     const st = state(d, server);
     if (st !== 'running') fail(`pod ${o.pod} is ${st ?? 'not up'}; run bin/dev up, or bin/check run --fresh`);

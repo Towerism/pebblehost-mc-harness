@@ -253,6 +253,27 @@ EOF
   [ "${summary#* }" -ge 1 ]
 }
 
+@test "a sqlite fixture built from committed SQL is read back through dev.sqlite on a --fresh pod" {
+  mkdir -p "$MC_HOME/checks/11-sqlite"
+  echo '{"kind":"e2e","sqlite":{"plugins/Economy/data.db":"economy.sql"}}' >"$MC_HOME/checks/11-sqlite/profile.json"
+  echo "CREATE TABLE users (name TEXT, coins INTEGER); INSERT INTO users VALUES ('ann', 5);" >"$MC_HOME/checks/11-sqlite/economy.sql"
+  cat >"$MC_HOME/checks/11-sqlite/db.test.ts" <<'EOF'
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { dev } from '#harness/dev';
+
+test('the fixture database holds the SQL rows', async () => {
+  assert.deepEqual(await dev.sqlite('plugins/Economy/data.db', 'SELECT name, coins FROM users'), [{ name: 'ann', coins: 5 }]);
+});
+EOF
+  git -C "$MC_HOME" add checks/11-sqlite
+  git -C "$MC_HOME" commit -q -m 'sqlite fixture check'
+  ISSUE=11 run check run 11-sqlite --fresh
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(label fresh)" = true ]
+}
+
 @test "down --all leaves nothing labelled" {
   run dev down --all
   [ "$status" -eq 0 ]

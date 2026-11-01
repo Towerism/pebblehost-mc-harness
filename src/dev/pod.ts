@@ -5,6 +5,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fail, must, type Docker } from './docker.ts';
 import { dirHash, privateDir, walk } from './image.ts';
 
@@ -70,8 +71,11 @@ function labelArgs(p: Pod): string[] {
 }
 
 // Merge fixture directories into dest; the same path from two sources with
-// different content is refused. Returns the fixtures hash.
-export function mergeFixtures(sources: string[], dest: string): string {
+// different content is refused. Then build each sqlite target (server path ->
+// SQL file) as a new database; a target that is also a fixture file is
+// refused. Returns the fixtures hash: the merged files' hash, extended by
+// each target and its SQL bytes (not the built bytes) when there are any.
+export function mergeFixtures(sources: string[], dest: string, sqlite: Record<string, string> = {}): string {
   rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true });
   const from = new Map<string, string>();
@@ -87,7 +91,29 @@ export function mergeFixtures(sources: string[], dest: string): string {
       cpSync(join(src, rel), join(dest, rel));
     }
   }
-  return dirHash(dest);
+  const files = dirHash(dest);
+  const targets = Object.keys(sqlite).sort();
+  if (targets.length === 0) return files;
+  const h = createHash('sha256').update(`${files}\n`);
+  for (const target of targets) {
+    const sql = sqlite[target];
+    const prev = from.get(target);
+    if (prev !== undefined) fail(`fixture conflict: ${target} is both a file in ${prev} and built from ${sql}`);
+    const text = readFileSync(sql);
+    h.update(`sqlite ${target} ${createHash('sha256').update(text).digest('hex')}\n`);
+    try {
+      mkdirSync(dirname(join(dest, target)), { recursive: true });
+      const db = new DatabaseSync(join(dest, target));
+      try {
+        db.exec(text.toString('utf8'));
+      } finally {
+        db.close();
+      }
+    } catch (e) {
+      fail(`sqlite fixture ${sql}: ${(e as Error).message}`);
+    }
+  }
+  return h.digest('hex');
 }
 
 // generation: a new id for each new volume; fresh: made by bin/check run
@@ -365,7 +391,7 @@ export function bootTimeout(boots: number[]): number {
   return Math.max(120, Math.ceil(3 * s[Math.floor(s.length / 2)]));
 }
 
-export type PodFile = { fixtures: string[]; jar?: string; heap?: string };
+export type PodFile = { fixtures: string[]; sqlite?: Record<string, string>; jar?: string; heap?: string };
 
 export function readPodFile(p: Pod): PodFile {
   const f = join(names(p).dir, 'pod.json');

@@ -8,12 +8,12 @@ import { boot } from '../dev/cli.ts';
 import { DevError, fail, must, type Docker } from '../dev/docker.ts';
 import { dirtyServer, git, privateDir, source, walk } from '../dev/image.ts';
 import { mergeFixtures, names, podOf, readPodFile, relayRequest, removePod, restartServer, type Pod } from '../dev/pod.ts';
-import { fixtureDirs, isData, readProfile, type Profile } from './profile.ts';
+import { fixtureDirs, isData, readProfile, sqliteFixtures, type Profile } from './profile.ts';
 import { checkEnv, checkHash, committedTests, refuseDirtyHarness, runTests, startLive, type Target } from './run.ts';
 import { readBudget, writeTimings, type Timings } from './timings.ts';
 
 export type SuiteCheck = { id: string; profile: Profile; fixturesHash: string; hasData: boolean };
-type Info = SuiteCheck & { files: string[]; fixtures: string[] };
+type Info = SuiteCheck & { files: string[]; fixtures: string[]; sqlite: Record<string, string> };
 
 // Between two checks on one pod: a restart that applies the fixtures again
 // (data: plugins hold it in memory), a copy of the fixture files, or nothing.
@@ -77,9 +77,10 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
       const profile = readProfile(o.root, id);
       const files = committedTests(o.root, id, checkHash(o.root, id), profile);
       const fixtures = fixtureDirs(o.root, id, profile);
-      const fixturesHash = mergeFixtures(fixtures, tmp);
+      const sqlite = sqliteFixtures(o.root, id, profile);
+      const fixturesHash = mergeFixtures(fixtures, tmp, sqlite);
       const hasData = profile.data.length > 0 || walk(tmp).some((rel) => isData(rel, profile));
-      info.set(id, { id, profile, files, fixtures, fixturesHash, hasData });
+      info.set(id, { id, profile, files, fixtures, sqlite, fixturesHash, hasData });
     } catch (e) {
       refuse(id, e);
     } finally {
@@ -144,7 +145,9 @@ export function runSuite(o: SuiteOpts, d: Docker): SuiteResult {
       up.push(p);
       say(`profile ${i + 1}/${plan.groups.length}: ${g.checks.join(', ')} on pod ${p.pod}`);
       const fixtures = [...new Set(g.checks.flatMap((id) => info.get(id)?.fixtures ?? []))];
-      const b = boot(p, { fixtures, jar: o.jar ?? dev.jar, heap: o.heap ?? dev.heap }, undefined, true);
+      // Same hash, same targets and SQL bytes: any check's SQL file will do.
+      const sqlite = Object.assign({}, ...g.checks.map((id) => info.get(id)?.sqlite));
+      const b = boot(p, { fixtures, sqlite, jar: o.jar ?? dev.jar, heap: o.heap ?? dev.heap }, undefined, true);
       timings.image ??= { cacheHit: b.cacheHit, seconds: b.buildSeconds };
       const tests = g.checks.map((id, j) => {
         // Bot players from the previous check leave first.

@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { DevError, type Docker } from '../../src/dev/docker.ts';
 import { build, buildContext, chooseJar, dirHash, dirtyHarness, toolHash, HARNESS_INPUTS, RELAY_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
 import { applyOverrides, OVERRIDES, setProperty, setYaml } from '../../src/dev/overrides.ts';
@@ -406,6 +407,27 @@ test('mergeFixtures: union of sources, identical overlap allowed, conflicting ov
   assert.equal(mergeFixtures([], join(tmp(), 'empty')), dirHash(join(tmp())));
   write(b, { 'x.yml': 'other' });
   assert.throws(() => mergeFixtures([a, b], dest), /fixture conflict: x\.yml/);
+});
+
+test('mergeFixtures: sqlite builds each database from its SQL; the hash covers the SQL and its target', () => {
+  const fx = tmp();
+  const sql = tmp();
+  write(fx, { 'plugins/E/config.yml': 'c' });
+  write(sql, { 'economy.sql': "CREATE TABLE users (name TEXT, coins INTEGER); INSERT INTO users VALUES ('ann', 5), ('bob', 7);", 'broken.sql': 'CREATE TABLE (;' });
+  const dest = join(tmp(), 'fixtures');
+  const h = mergeFixtures([fx], dest, { 'plugins/E/data.db': join(sql, 'economy.sql') });
+  const db = new DatabaseSync(join(dest, 'plugins/E/data.db'), { readOnly: true });
+  assert.deepEqual(db.prepare('SELECT name, coins FROM users ORDER BY name').all().map((r) => ({ ...r })), [{ name: 'ann', coins: 5 }, { name: 'bob', coins: 7 }]);
+  db.close();
+  assert.equal(readFileSync(join(dest, 'plugins/E/config.yml'), 'utf8'), 'c');
+  assert.equal(mergeFixtures([fx], join(tmp(), 'again'), { 'plugins/E/data.db': join(sql, 'economy.sql') }), h);
+  assert.notEqual(h, mergeFixtures([fx], join(tmp(), 'plain')));
+  assert.notEqual(h, mergeFixtures([fx], join(tmp(), 'moved'), { 'plugins/E/other.db': join(sql, 'economy.sql') }));
+  write(sql, { 'economy.sql': "CREATE TABLE users (name TEXT, coins INTEGER); INSERT INTO users VALUES ('ann', 6);" });
+  assert.notEqual(h, mergeFixtures([fx], join(tmp(), 'changed'), { 'plugins/E/data.db': join(sql, 'economy.sql') }));
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'broken'), { 'b.db': join(sql, 'broken.sql') }), new RegExp(`sqlite fixture ${join(sql, 'broken.sql')}: .*syntax error`));
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'clash'), { 'plugins/E/config.yml': join(sql, 'economy.sql') }), /fixture conflict: plugins\/E\/config\.yml is both a file in .* and built from .*economy\.sql/);
+  assert.throws(() => mergeFixtures([fx], join(tmp(), 'under'), { 'plugins/E/config.yml/x.db': join(sql, 'economy.sql') }), /sqlite fixture .*economy\.sql: /);
 });
 
 test('parseBootReport finds the boot time, enabled plugins, failures and errors', () => {
