@@ -259,6 +259,29 @@ test('bin/dev console sends the words as one console request through docker exec
   assert.deepEqual([dashed.status, dashed.stdout, JSON.parse(dashed.stdin).command], [0, '', '--weird']);
 });
 
+test('bin/dev bot sends one bot request per call through the relay and marks the volume explored', () => {
+  let r = consoleCli({ FAKE_REPLY: '{"ok":true,"name":"Steve"}' }, 'bot', '--pod', 'p2', 'join', 'Steve');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'bot: Steve joined\n');
+  assert.deepEqual(JSON.parse(r.stdin), { op: 'bot.join', name: 'Steve' });
+  assert.match(r.argv, /^exec mc-[0-9a-f]{8}-p2-server touch \/server\/\.mc-harness-explored$/m);
+  r = consoleCli({ FAKE_REPLY: '{"ok":true}' }, 'bot', '--pod', 'p2', 'chat', 'Steve', '/me', 'waves');
+  assert.deepEqual([r.status, r.stdout, JSON.parse(r.stdin)], [0, 'bot: Steve sent\n', { op: 'bot.chat', name: 'Steve', message: '/me waves' }]);
+  r = consoleCli({ FAKE_REPLY: '{"ok":true,"line":"[Server] hi"}' }, 'bot', '--timeout', '3', 'wait', 'Steve', 'hi$');
+  assert.deepEqual([r.status, r.stdout, JSON.parse(r.stdin)], [0, '[Server] hi\n', { op: 'bot.waitMessage', name: 'Steve', regex: 'hi$', timeoutMs: 3000 }]);
+  r = consoleCli({ FAKE_REPLY: '{"ok":true,"bots":["Alex","Steve"]}' }, 'bot', '--pod', 'p2', 'list');
+  assert.deepEqual([r.status, r.stdout], [0, 'Alex\nSteve\n']);
+  assert.doesNotMatch(r.argv, /touch/, 'list does not mark the volume explored');
+  for (const [args, msg] of [[['bot'], /bot needs join NAME/], [['bot', 'dance', 'Steve'], /bot needs join NAME/], [['bot', 'chat', 'Steve'], /bot chat needs the text/]] as const) {
+    r = consoleCli({}, ...args);
+    assert.equal(r.status, 2, args.join(' '));
+    assert.match(r.stderr, msg);
+  }
+  r = consoleCli({ FAKE_REPLY: '{"ok":false,"error":"no bot Steve; bot.join it first"}' }, 'bot', 'quit', 'Steve');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /no bot Steve; bot\.join it first/);
+});
+
 test('bin/dev console exits 2 with a reason when the pod, server or relay is not up, or the relay reports an error', () => {
   const cases: [Record<string, string>, string[], RegExp][] = [
     [{}, ['console'], /console needs a server command/],
