@@ -3,7 +3,9 @@
 // bare-text check, and untracked server files all fail to make a check pass.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { readRecords } from '../../src/check/record.ts';
 import { spawnSync } from 'node:child_process';
 import { check, commit, E2E, ENV, git, project, write } from './project.ts';
@@ -102,4 +104,26 @@ test('a check imports only from its own directory: a sibling helper or a relativ
   const r = check(root, {}, 'run', '3-c');
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(readRecords(root, 3).length, 1);
+});
+
+test('a committed symlink in a check is refused, even one named *.test.ts', () => {
+  const root = project({ ...E2E, 'checks/3-motd/a.test.ts': "import { test } from 'node:test';\ntest('a', () => {});\n", 'evil/evil.test.ts': "import { test } from 'node:test';\ntest('evil', () => { throw new Error('EVIL RAN'); });\n" });
+  symlinkSync('../../evil/evil.test.ts', join(root, 'checks/3-motd/zz.test.ts'));
+  commit(root, {});
+  const r = check(root, {}, 'run', '3-motd');
+  assert.equal(r.status, 2, r.stdout);
+  assert.match(r.stderr, /symlinks refused in checks\/3-motd: checks\/3-motd\/zz\.test\.ts/);
+  assert.doesNotMatch(r.stdout + r.stderr, /EVIL RAN/);
+  assert.deepEqual(readRecords(root, 3), []);
+});
+
+test('a data: import (which could import any file) is refused, nothing recorded', () => {
+  const helper = 'export const ok = true;\n';
+  const root = project({ 'lib/helper.ts': helper, ...E2E });
+  const url = pathToFileURL(join(root, 'lib/helper.ts')).href;
+  commit(root, { 'checks/3-motd/a.test.ts': `import { test } from 'node:test';\ntest('a', async () => { const m = await import(${JSON.stringify(`data:text/javascript,import ${JSON.stringify(url)}; export const x = 1;`)}); if (!m) throw new Error(); });\n` });
+  const r = check(root, {}, 'run', '3-motd');
+  assert.equal(r.status, 2, r.stdout);
+  assert.match(r.stderr, /imports from outside its directory; nothing recorded\n.*data:text\/javascript/);
+  assert.deepEqual(readRecords(root, 3), []);
 });

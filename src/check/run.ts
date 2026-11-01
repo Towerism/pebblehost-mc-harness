@@ -42,11 +42,15 @@ export function refuseDirtyHarness(): void {
 }
 
 // The committed test files of checks/<id> (tree `hash`), as paths from the
-// project root. Refuses a check without tests, and anything but profile.json
+// project root. Refuses a symlink anywhere in the check, a check without
+// tests, and anything but profile.json
 // and *.test.ts in a bare-text check: a package.json, a helper module or a
 // directory could change what it runs.
 export function committedTests(root: string, id: string, hash: string, profile: Profile): string[] {
-  const tests = git(root, ['ls-tree', hash]).stdout.split('\n').map((l) => /^\d+ blob \w+\t(.+\.test\.ts)$/.exec(l)?.[1]).filter((f): f is string => f !== undefined).sort();
+  // A committed symlink (mode 120000) would run or read code outside the check.
+  const links = git(root, ['ls-tree', '-r', hash]).stdout.split('\n').filter((l) => l.startsWith('120000 ')).map((l) => `checks/${id}/${l.split('\t')[1]}`);
+  if (links.length > 0) fail(`symlinks refused in checks/${id}: ${links.join(', ')}`);
+  const tests = git(root, ['ls-tree', hash]).stdout.split('\n').map((l) => /^100\d+ blob \w+\t(.+\.test\.ts)$/.exec(l)?.[1]).filter((f): f is string => f !== undefined).sort();
   if (tests.length === 0) fail(`checks/${id} has no *.test.ts`);
   const extra = readdirSync(join(root, 'checks', id), { withFileTypes: true }).filter((e) => !(e.isFile() && (e.name === 'profile.json' || e.name.endsWith('.test.ts')))).map((e) => e.name);
   if (profile.kind === 'bare-text' && extra.length > 0) fail(`checks/${id} is bare-text: only profile.json and *.test.ts are allowed, not ${extra.join(', ')}`);
