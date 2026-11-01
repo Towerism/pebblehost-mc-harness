@@ -32,6 +32,14 @@ Exit codes: 0 ok, 1 differences found (`diff` only), 2 error.
 
 `server/`, `backups/` and `.mc/` are git-ignored: server files can hold plugin database passwords and must not be committed to this public repo.
 
+### From a git worktree
+
+Background sessions may edit files only inside their worktree. Run the worktree's own `bin/mc`; no override is needed:
+
+- `.env` comes from the main checkout when the worktree has none (`MC_ENV_FILE` still wins).
+- `backups/` is the main checkout's, so backups survive `git worktree remove`. Messages print its absolute path.
+- `server/` and `.mc/` are the worktree's own: pull fresh into the worktree, edit there, and push from there. They are deleted with the worktree.
+
 ## Taking a task
 
 1. Locate: `bin/mc ls` from the root down (`plugins/`, the plugin's folder). Common places: `server.properties`, `bukkit.yml`, `spigot.yml`, `config/paper-*.yml`, `plugins/<Plugin>/config.yml` and the plugin's data folders, `logs/latest.log` for errors.

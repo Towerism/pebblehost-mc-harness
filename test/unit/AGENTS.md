@@ -4,7 +4,7 @@
 **Generated:** 2026-11-01 · **Updated:** 2026-11-01
 
 ## Purpose
-Unit tests for `bin/mc`: `.env` parsing, the mapping to rclone variables, path safety, root `--all` guards, conflict refusal, backup ordering and password secrecy. No network.
+Unit tests for `bin/mc`: `.env` parsing, the mapping to rclone variables, path safety, root `--all` guards, conflict refusal, backup ordering, password secrecy and the linked-worktree `.env` and `backups/` paths (`make_worktree` builds a throwaway repo and worktree). No network.
 
 ## Key Files
 | File | Description |

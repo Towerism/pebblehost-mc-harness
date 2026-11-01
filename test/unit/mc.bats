@@ -198,3 +198,54 @@ ENV
   [ "$status" -eq 2 ]
   [[ $output == *"usage: mc"* ]]
 }
+
+# A linked worktree of a fresh repo under $BATS_TEST_TMPDIR; MC_HOME points at the worktree.
+make_worktree() {
+  main=$BATS_TEST_TMPDIR/main
+  git init -q "$main"
+  git -C "$main" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+  git -C "$main" worktree add -q "$BATS_TEST_TMPDIR/wt"
+  mv "$MC_HOME/.env" "$main/.env"
+  export MC_HOME=$BATS_TEST_TMPDIR/wt
+}
+
+@test "a worktree without .env uses the main checkout's .env" {
+  make_worktree
+  run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=node.example.net' "$STUB_ENV"
+}
+
+@test "a worktree's own .env and MC_ENV_FILE win over the main checkout's" {
+  make_worktree
+  printf 'PEBBLE_SFTP_HOST=wt.example.net\nPEBBLE_SFTP_USER=u\nPEBBLE_PANEL_PASSWORD=p\n' >"$MC_HOME/.env"
+  run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=wt.example.net' "$STUB_ENV"
+  printf 'PEBBLE_SFTP_HOST=other.example.net\nPEBBLE_SFTP_USER=u\nPEBBLE_PANEL_PASSWORD=p\n' >"$BATS_TEST_TMPDIR/other.env"
+  MC_ENV_FILE=$BATS_TEST_TMPDIR/other.env run "$mc" ls
+  [ "$status" -eq 0 ]
+  grep -qx 'RCLONE_CONFIG_PEBBLE_HOST=other.example.net' "$STUB_ENV"
+}
+
+@test "a push from a worktree backs up into the main checkout; the mirror stays in the worktree" {
+  make_worktree
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  [ "$(cat "$MC_HOME/server/plugins/a.yml")" = remote ]
+  [ ! -e "$main/server" ]
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"previous remote copy in $main/backups/"* ]]
+  [ "$(cat "$main"/backups/*/remote/plugins/a.yml)" = remote ]
+  [ ! -e "$MC_HOME/backups" ]
+}
+
+@test "outside a worktree, backups stay under MC_HOME" {
+  echo 'a.yml|10|2026-01-01 00:00:00' >"$STUB_LSF"
+  "$mc" pull plugins/a.yml
+  run "$mc" push plugins/a.yml
+  [ "$status" -eq 0 ]
+  [[ $output == *"previous remote copy in backups/"* ]]
+}
+
