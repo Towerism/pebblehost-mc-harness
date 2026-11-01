@@ -61,7 +61,7 @@ MC_EXCLUDE_FILE names an rclone exclude file (one pattern per line, matched
 relative to the path given): matching paths are left out of every listing
 and transfer of a directory (rclone takes no filters on a single file;
 bin/dev sync writes one per directory from sync-rules).
-MC_FILTER_FILE names an rclone filter file (+/- rules) for listings:
+MC_FILTER_FILE names an rclone filter file (+/- rules) for ls only:
 bin/dev sync lists its tracked roots in one call with it.
 Exit codes: 0 ok, 1 diff found differences, 2 error.
 EOF
@@ -147,9 +147,11 @@ if [[ -n ${MC_EXCLUDE_FILE:-} ]]; then
   [[ -f $MC_EXCLUDE_FILE ]] || die "MC_EXCLUDE_FILE $MC_EXCLUDE_FILE not found"
   filter=(--exclude-from "$MC_EXCLUDE_FILE")
 fi
+# Rules for ls only (MC_FILTER_FILE).
+lsfilter=()
 if [[ -n ${MC_FILTER_FILE:-} ]]; then
   [[ -f $MC_FILTER_FILE ]] || die "MC_FILTER_FILE $MC_FILTER_FILE not found"
-  filter+=(--filter-from "$MC_FILTER_FILE")
+  lsfilter=(--filter-from "$MC_FILTER_FILE")
 fi
 
 state_file() { printf '%s/%s/%s' "$state" "$1" "$(printf '%s' "$2" | sha1sum | cut -d' ' -f1)"; }
@@ -171,10 +173,10 @@ new_backup() {
 cmd_ls() {
   local rec=()
   ((recursive)) && rec=(-R --files-only)
-  ((long)) || { rclone lsf "${rec[@]}" "${filter[@]}" "$(remote "$1")"; return; }
+  ((long)) || { rclone lsf "${rec[@]}" "${filter[@]}" "${lsfilter[@]}" "$(remote "$1")"; return; }
   local size time name
   # Name last, so a | in a name stays in the name; directories have size -1.
-  rclone lsf "${rec[@]}" --format stp --separator '|' "${filter[@]}" "$(remote "$1")" | while IFS='|' read -r size time name; do
+  rclone lsf "${rec[@]}" --format stp --separator '|' "${filter[@]}" "${lsfilter[@]}" "$(remote "$1")" | while IFS='|' read -r size time name; do
     ((size >= 0)) || size=-
     printf '%12s  %s  %s\n' "$size" "$time" "$name"
   done

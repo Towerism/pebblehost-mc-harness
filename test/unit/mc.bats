@@ -405,11 +405,15 @@ make_worktree() {
   [[ $output == *"-l and -R work only with ls"* ]]
 }
 
-@test "MC_FILTER_FILE reaches listings as --filter-from" {
+@test "MC_FILTER_FILE reaches ls listings as --filter-from, and nothing else" {
   printf -- '+ /plugins/**\n- **\n' >"$BATS_TEST_TMPDIR/filter"
   MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" ls -R -l
   [ "$status" -eq 0 ]
   grep -q "^rclone lsf -R --files-only --format stp --separator | --filter-from $BATS_TEST_TMPDIR/filter pebble:$" "$STUB_LOG"
+  # Listings only: pull's snapshot and copy, diff and push take no filter.
+  MC_FILTER_FILE=$BATS_TEST_TMPDIR/filter run "$mc" pull plugins
+  [ "$status" -eq 0 ]
+  [ "$(grep -c -- '--filter-from' "$STUB_LOG")" -eq 1 ]
   MC_FILTER_FILE=$BATS_TEST_TMPDIR/missing run "$mc" ls
   [ "$status" -eq 2 ]
   [[ $output == *"MC_FILTER_FILE $BATS_TEST_TMPDIR/missing not found"* ]]
