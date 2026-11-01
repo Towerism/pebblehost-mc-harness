@@ -11,7 +11,7 @@ End-to-end tests for `bin/mc` with real rclone against a local SFTP server.
 |------|-------------|
 | `setup_suite.bash` | Starts one `atmoz/sftp:alpine` container for the whole run (user `mc`, a password containing `$` and a space, random localhost port, writable `upload/`), waits for sshd, and removes it in `teardown_suite` (it also runs when setup fails) |
 | `mc.bats` | Scenarios: root push with `--all`, ls, `ls -l` sizes, pull → edit → diff → push, backup contents, refusal after a remote change, remote deletes not resurrected, wrong password not echoed |
-| `target-live.bats` | `bin/check run` and `suite --target live` with the container as live: file, `logs/latest.log` and SQLite reads through `bin/mc pull`, a declared console need skipped, an undeclared one failing, a bot-only check exiting 2, records `target: live`, nothing pulled kept. Sorts after `mc.bats` on purpose (it seeds `/home/mc/logs` as root) |
+| `target-live.bats` | `bin/check run` and `suite --target live` with the container as live: file, `logs/latest.log` and SQLite reads through `bin/mc pull`, a declared console need skipped, an undeclared one failing, a bot-only check exiting 2, records `target: live`, nothing pulled kept, a directory read refused. Sorts after `mc.bats` on purpose (it seeds `/home/mc/logs` as root) |
 
 ## For AI Agents
 

@@ -4,12 +4,12 @@
 // (bin/check run --target live) file, log and database reads come from the
 // live server over SFTP, and the console and restarts are refused (live.ts).
 import { DatabaseSync } from 'node:sqlite';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { docker as d, must } from '../dev/docker.ts';
 import { names, podOf, relayRequest, restartServer } from '../dev/pod.ts';
-import { livePull, onLive, refuseOnLive } from './live.ts';
+import { LIVE_CHANGED, liveList, livePull, onLive, refuseOnLive, splitPath } from './live.ts';
 
 function pod() {
   if (process.env.MC_TARGET !== undefined && process.env.MC_TARGET !== 'dev') throw new Error(`target ${process.env.MC_TARGET} has no pod`);
@@ -67,17 +67,25 @@ export const dev = {
     try {
       const db = join(tmp, basename(path));
       if (onLive()) {
+        // The db, -wal and -shm come in three pulls; a plugin writing in
+        // between would pair mismatched files. Their listing must be the
+        // same before and after; one retry, then the run is refused.
         const rel = serverPath(path).slice('/server/'.length);
-        copyFileSync(livePull(rel), db);
-        for (const ext of ['-wal', '-shm']) {
-          // Usually absent on live once the plugin checkpointed.
-          let got: string | null = null;
-          try {
-            got = livePull(`${rel}${ext}`);
-          } catch {
-            got = null;
+        const { dir, name } = splitPath(rel);
+        const state = () => {
+          const l = liveList(dir);
+          return ['', '-wal', '-shm'].map((ext) => l.get(`${name}${ext}`) ?? 'absent');
+        };
+        for (let attempt = 1; ; attempt++) {
+          const before = state();
+          copyFileSync(livePull(rel), db);
+          for (const [i, ext] of ['-wal', '-shm'].entries()) {
+            rmSync(`${db}${ext}`, { force: true });
+            // Usually absent on live once the plugin checkpointed.
+            if (before[i + 1] !== 'absent') copyFileSync(livePull(`${rel}${ext}`), `${db}${ext}`);
           }
-          if (got && existsSync(got)) copyFileSync(got, `${db}${ext}`);
+          if (JSON.stringify(state()) === JSON.stringify(before)) break;
+          if (attempt === 2) throw new Error(`${LIVE_CHANGED}: ${rel} (with its -wal and -shm) changed during both pulls; run the check again when the server is quieter`);
         }
       } else {
         const server = names(pod()).server;

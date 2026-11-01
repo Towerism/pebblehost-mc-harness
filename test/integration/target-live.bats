@@ -67,6 +67,23 @@ EOF
   [ -z "$(ls -A "$MC_HOME/.dev/live")" ]
 }
 
+@test "a live read of a directory is refused before any copy" {
+  remote_sh "mkdir -p $dir/plugins/Eco/secret && printf 'SECRET\n' >$dir/plugins/Eco/secret/key.txt"
+  add_check 4-dir '{"kind":"e2e"}' <<EOF
+import { test } from 'node:test';
+import { dev } from '#harness/dev';
+test('dir', async () => { await dev.file('$dir/plugins'); });
+test('slash', async () => { await dev.file('$dir/plugins/'); });
+test('nested', async () => { await dev.file('$dir/plugins/Eco/secret'); });
+EOF
+  commit_all
+  run "$check" run 4-dir --target live </dev/null
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ $output == *"$dir/plugins is a directory on live"* && $output == *"$dir/plugins/: a live read takes a file path"* && $output == *"$dir/plugins/Eco/secret is a directory on live"* ]]
+  [ -z "$(ls -A "$MC_HOME/.dev/live")" ]
+}
+
 @test "an undeclared console call fails the live run; a check that only needs a bot exits 2; the live suite reports all three" {
   add_check 4-undeclared '{"kind":"e2e"}' <<EOF
 import { test } from 'node:test';
