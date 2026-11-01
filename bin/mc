@@ -26,9 +26,10 @@ export TZ=UTC
 
 usage() {
   cat <<'EOF'
-usage: mc <command> [path] [--all]
+usage: mc <command> [path] [--all] [-l]
 
-  ls   [path]  list one remote directory level (dirs end in /)
+  ls   [path]  list one remote directory level (dirs end in /);
+               -l, --long adds size in bytes and modtime (UTC)
   pull <path>  copy remote path into server/<path>; unpushed local edits
                there are moved to backups/<ts>/local/ first
   diff <path>  diff remote path against server/<path>; exit 1 if they differ
@@ -120,7 +121,15 @@ show() { printf '%s' "${1#"$home"/}"; }
 
 new_backup() { mkdir -p "$backups" && mktemp -d "$backups/$(date +%Y%m%d-%H%M%S)-XXXX"; }
 
-cmd_ls() { rclone lsf "$(remote "$1")"; }
+cmd_ls() {
+  ((long)) || { rclone lsf "$(remote "$1")"; return; }
+  local size time name
+  # Name last, so a | in a name stays in the name; directories have size -1.
+  rclone lsf --format stp --separator '|' "$(remote "$1")" | while IFS='|' read -r size time name; do
+    ((size >= 0)) || size=-
+    printf '%12s  %s  %s\n' "$size" "$time" "$name"
+  done
+}
 
 cmd_pull() {
   local p=$1 stash
@@ -171,17 +180,20 @@ cmd_push() {
 
 main() {
   local cmd=${1:-} path="" all=0 arg
+  long=0
   [[ -n $cmd ]] || { usage; exit 2; }
   shift
   for arg in "$@"; do
     case $arg in
       --all) all=1 ;;
+      -l | --long) long=1 ;;
       -h | --help) usage; exit 0 ;;
       -*) die "unknown option: $arg" ;;
       *) [[ -z $path ]] || die "one path at a time"; path=$(clean_path "$arg") ;;
     esac
   done
   [[ $path == . ]] && path=""
+  [[ $long == 0 || $cmd == ls ]] || die "-l works only with ls"
   case $cmd in
     ls) ;;
     pull | diff | push) [[ -n $path || $all == 1 ]] || die "$cmd on the server root needs --all" ;;

@@ -249,3 +249,31 @@ make_worktree() {
   [[ $output == *"previous remote copy in backups/"* ]]
 }
 
+@test "ls -l shows size and modtime; directories show - for size" {
+  printf '%s\n' '-1|2026-11-01 09:12:40|ExcellentEconomy/' '173814|2026-10-30 18:01:02|ExcellentEconomy-2.8.0.jar' '5|2026-10-30 18:01:02|a|b.yml' >"$STUB_LSF"
+  run "$mc" ls plugins -l
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = '           -  2026-11-01 09:12:40  ExcellentEconomy/' ]
+  [ "${lines[1]}" = '      173814  2026-10-30 18:01:02  ExcellentEconomy-2.8.0.jar' ]
+  [ "${lines[2]}" = '           5  2026-10-30 18:01:02  a|b.yml' ]
+  grep -qx "rclone lsf --format stp --separator | pebble:plugins" "$STUB_LOG"
+  run "$mc" ls --long plugins
+  [ "$status" -eq 0 ]
+}
+
+@test "plain ls prints rclone's names unchanged" {
+  printf '%s\n' 'ExcellentEconomy/' 'ExcellentEconomy-2.8.0.jar' >"$STUB_LSF"
+  run "$mc" ls plugins
+  [ "$status" -eq 0 ]
+  [ "$output" = $'ExcellentEconomy/\nExcellentEconomy-2.8.0.jar' ]
+  grep -qx "rclone lsf pebble:plugins" "$STUB_LOG"
+}
+
+@test "-l with pull, diff or push is refused" {
+  for c in pull diff push; do
+    run "$mc" "$c" plugins/a.yml -l
+    [ "$status" -eq 2 ]
+    [[ $output == *"-l works only with ls"* ]]
+  done
+  [ ! -e "$STUB_LOG" ]
+}

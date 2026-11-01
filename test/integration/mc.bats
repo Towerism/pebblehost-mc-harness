@@ -36,6 +36,15 @@ remote_sh() { docker exec -u "$SFTP_UID" -w /home/mc "$SFTP_CONTAINER" sh -c "$1
   [[ $output == *"crates.yml"* ]]
 }
 
+@test "ls -l shows byte sizes and marks directories" {
+  run "$mc" ls -l "$dir/plugins/Crates"
+  [ "$status" -eq 0 ]
+  [[ $output =~ (^|$'\n')' '+16'  '[0-9]{4}-[0-9]{2}-[0-9]{2}' '[0-9:]{8}'  crates.yml'($|$'\n') ]]
+  run "$mc" ls -l "$dir/plugins"
+  [ "$status" -eq 0 ]
+  [[ $output =~ ' '+'-  '[0-9-]{10}' '[0-9:]{8}'  Crates/' ]]
+}
+
 @test "pull, edit, diff, push round-trips a directory" {
   "$mc" pull "$dir/plugins/Crates"
   [ "$(cat "$MC_HOME/server/$dir/plugins/Crates/crates.yml")" = "reward: diamond" ]
