@@ -222,6 +222,23 @@ test('the build context refuses committed symlinks', () => {
   assert.throws(() => buildContext(source(root), tmp()), /symlinks refused.*server\/link/);
 });
 
+test('the build context holds the committed bytes: replace refs are ignored, export-ignore and export-subst are refused', () => {
+  const root = gitRepo({ 'server/a.jar': '1', 'server/a.yml': 'name: bad\n', 'server/b.yml': 'v: $Format:%H$\n' });
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const g = (...args: string[]) => spawnSync('git', ['-C', root, ...args], { env, encoding: 'utf8' }).stdout.trim();
+  const good = spawnSync('git', ['-C', root, 'hash-object', '-w', '--stdin'], { env, input: 'name: good\n', encoding: 'utf8' }).stdout.trim();
+  g('replace', g('rev-parse', 'HEAD:server/a.yml'), good);
+  assert.equal(g('show', 'HEAD:server/a.yml'), 'name: good');
+  const ctx = tmp();
+  buildContext(source(root), ctx);
+  assert.equal(readFileSync(join(ctx, 'cfg/a.yml'), 'utf8'), 'name: bad\n');
+  // Local attributes that drop or rewrite files in git archive.
+  for (const attr of ['server/a.yml export-ignore\n', 'server/b.yml export-subst\n']) {
+    write(root, { '.git/info/attributes': attr });
+    assert.throws(() => buildContext(source(root), tmp()), /git archive of server\/ at [0-9a-f]{12} is not its tree/, attr);
+  }
+});
+
 test('stepCached reads classic and BuildKit output', () => {
   const step = 'COPY --chown=1000:1000 bin ';
   assert.ok(stepCached('Step 3/9 : COPY --chown=1000:1000 bin /server/\n ---> Using cache\n ---> 1a2b\n', step));
