@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
+import { matchRule, readRules, type Rule } from '../sync/rules.ts';
 import { classify, MAX_BYTES, type Profile } from './paths.ts';
 
 const USAGE = 'usage: path-guard --staged | --range A..B | --history REV [--profile public|private]';
@@ -162,10 +163,23 @@ if (blobs.length > 0) {
   });
 }
 
+// The private repo's sync-rules: skip and data paths under server/ are
+// refused too (the defaults when the repo has no sync-rules).
+let rules: Rule[] = [];
+if (profile === 'private') {
+  try {
+    rules = readRules(gitOrNull(['rev-parse', '--show-toplevel']) ?? '.');
+  } catch (e) {
+    die((e as Error).message);
+  }
+}
+
 const refused = new Map<string, string>();
 const copies = profile === 'public' && blobs.length > 0 ? serverBlobs() : new Map<string, string>();
 for (const e of entries) {
   let reason = e.mode === '120000' ? 'symlink' : classify(e.path, sizes.get(e) ?? 0, profile);
+  const rule = !reason && e.path.startsWith('server/') ? matchRule(rules, e.path.slice('server/'.length)) : undefined;
+  if (rule) reason = `sync-rules: ${rule.cls} ${rule.pattern}`;
   const copy = copies.get(e.blob);
   if (!reason && copy && e.mode !== '160000') reason = `identical to server file ${copy}`;
   if (reason && !refused.has(e.path)) refused.set(e.path, reason);

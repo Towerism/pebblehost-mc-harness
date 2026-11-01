@@ -369,7 +369,38 @@ make_worktree() {
   for c in pull diff push; do
     run "$mc" "$c" plugins/a.yml -l
     [ "$status" -eq 2 ]
-    [[ $output == *"-l works only with ls"* ]]
+    [[ $output == *"-l and -R work only with ls"* ]]
   done
   [ ! -e "$STUB_LOG" ]
+}
+
+@test "MC_EXCLUDE_FILE reaches every listing and transfer as --exclude-from" {
+  printf 'logs/**\n*.db\n' >"$BATS_TEST_TMPDIR/excl"
+  export MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/excl
+  run "$mc" ls plugins
+  [ "$status" -eq 0 ]
+  run "$mc" pull plugins
+  [ "$status" -eq 0 ]
+  run "$mc" diff plugins
+  [ "$(grep -c "^rclone lsf .*--exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -ge 2 ]
+  [ "$(grep -c "^rclone copyto .*--exclude-from $MC_EXCLUDE_FILE" "$STUB_LOG")" -eq 2 ]
+  export MC_EXCLUDE_FILE=$BATS_TEST_TMPDIR/missing
+  run "$mc" ls plugins
+  [ "$status" -eq 2 ]
+  [[ $output == *"MC_EXCLUDE_FILE $BATS_TEST_TMPDIR/missing not found"* ]]
+}
+
+@test "without MC_EXCLUDE_FILE no filter is passed" {
+  run "$mc" pull plugins
+  [ "$status" -eq 0 ]
+  run ! grep -q -- '--exclude-from' "$STUB_LOG"
+}
+
+@test "ls -R lists every file below; -R works only with ls" {
+  run "$mc" ls -R -l plugins
+  [ "$status" -eq 0 ]
+  grep -q '^rclone lsf -R --files-only --format stp' "$STUB_LOG"
+  run "$mc" pull plugins -R
+  [ "$status" -eq 2 ]
+  [[ $output == *"-l and -R work only with ls"* ]]
 }

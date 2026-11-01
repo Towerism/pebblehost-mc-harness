@@ -3,6 +3,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { inventory, issueBranch, refuseSkipped, seedData, syncLive } from '../sync/sync.ts';
 import { DevError, docker as d, fail, must } from './docker.ts';
 import { build, buildRelay, chooseJar, dirtyHarness, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
 import { bootTimeout, createJoin, createPod, formatBootReport, killOrphanSuite, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
@@ -23,6 +24,17 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
                           compared with LOG (default server/logs/latest.log)
   join [--port N] [--stop]
                           proxy 127.0.0.1:N (default 25565) to the server
+  sync                    pull live's tracked roots (minus sync-rules skip and
+                          data) in the main worktree .dev/sync and commit
+                          "live drift: <n> files" on main when anything changed
+  seed N [--with-data PATH...] [--with-worlds] [--no-boot]
+                          sync, put the project on issue/N (reused, or cut from
+                          main), pull the opt-in data into .dev/seed-N, and boot
+                          a fresh pod with it as fixtures (--no-boot: stop
+                          before the pod)
+  inventory [--wait S]    list plugins/ twice S seconds apart (default 300) and
+                          add review entries to main's sync-rules for files that
+                          changed and data-like directory names
   console <command...>    run a server command over RCON through the pod's
                           relay and print its reply
   bot join NAME | chat NAME TEXT... | wait NAME REGEX [--timeout S]
@@ -39,10 +51,10 @@ bounds each boot (default 3x the median of the pod's last boots, or 600s).
 server/ comes from $MC_HOME (default: the harness root): git archive of HEAD
 when server/ is tracked, else a plain copy. Exit codes: 0 ok, 2 error.`;
 
-type Opts = { words: string[]; pod: string; fixtures: string[]; timeout?: number; port: number; all: boolean; follow: boolean; tail?: string; stop: boolean; jar?: string; heap?: string; against?: string };
+type Opts = { words: string[]; issue?: number; withData: string[]; withWorlds: boolean; noBoot: boolean; wait: number; pod: string; fixtures: string[]; timeout?: number; port: number; all: boolean; follow: boolean; tail?: string; stop: boolean; jar?: string; heap?: string; against?: string };
 
 function parse(argv: string[]): { cmd: string; o: Opts } {
-  const o: Opts = { words: [], pod: 'dev', fixtures: [], port: 25565, all: false, follow: false, stop: false };
+  const o: Opts = { words: [], withData: [], withWorlds: false, noBoot: false, wait: 300, pod: 'dev', fixtures: [], port: 25565, all: false, follow: false, stop: false };
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '-h' || cmd === '--help') fail(USAGE);
   for (let i = 0; i < rest.length; i++) {
@@ -54,7 +66,15 @@ function parse(argv: string[]): { cmd: string; o: Opts } {
       o.words = rest.slice(a === '--' ? i + 1 : i);
       break;
     }
-    if (a === '--pod') o.pod = val();
+    if (cmd === 'seed' && o.issue === undefined && /^[1-9]\d*$/.test(a)) o.issue = Number(a);
+    else if (a === '--with-data') {
+      // Every following word up to the next option is a server path.
+      while (rest[i + 1] !== undefined && !rest[i + 1].startsWith('-')) o.withData.push(rest[++i]);
+      if (o.withData.length === 0) fail(`--with-data needs server paths\n${USAGE}`);
+    } else if (a === '--with-worlds') o.withWorlds = true;
+    else if (a === '--no-boot') o.noBoot = true;
+    else if (a === '--wait') o.wait = Number(val());
+    else if (a === '--pod') o.pod = val();
     else if (a === '--fixtures') o.fixtures.push(resolve(val()));
     else if (a === '--timeout') o.timeout = Number(val());
     else if (a === '--port') o.port = Number(val());
@@ -182,6 +202,28 @@ function main(argv: string[]) {
       say(formatBootReport(dev, existsSync(against) ? parseBootReport(readFileSync(against, 'utf8')) : undefined));
       break;
     }
+    case 'sync':
+      syncLive(root);
+      break;
+    case 'seed': {
+      if (o.issue === undefined) fail(`seed needs an issue number\n${USAGE}`);
+      const n = o.issue;
+      refuseSkipped(root, o.withData);
+      const branch = issueBranch(root, n, () => syncLive(root));
+      say(`seed: ${branch} issue/${n}`);
+      const fixtures = seedData(root, n, { withData: o.withData, withWorlds: o.withWorlds });
+      if (o.noBoot) {
+        say(`seed: issue/${n} ready${fixtures.length ? ` with data in .dev/seed-${n}` : ''}; no pod booted`);
+        break;
+      }
+      // A fresh pod: the old container and volume go, the new volume gets the data.
+      boot(p, { fixtures, jar: o.jar, heap: o.heap }, o.timeout, true);
+      break;
+    }
+    case 'inventory':
+      if (!(o.wait >= 0)) fail(`bad --wait\n${USAGE}`);
+      inventory(root, o.wait);
+      break;
     case 'join': {
       if (o.stop) {
         d(['rm', '-f', n.join]);
