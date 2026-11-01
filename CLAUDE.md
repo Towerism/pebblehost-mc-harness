@@ -26,7 +26,7 @@ Exit codes: 0 ok, 1 differences found (`diff` only), 2 error.
 - `pull` replaces `server/<path>` with the remote copy. If the local copy holds edits that were never pushed, it moves them to `backups/<ts>/local/<path>` first and says so.
 - `push` refuses when the remote listing (size and modtime, 1-second precision) changed since the last `pull` of that same path. Pull again, then reapply the edits from `backups/<ts>/local/`. Listings are kept per path: after pushing `plugins/X/a.yml`, a push of `plugins/X` is refused until `plugins/X` is pulled again.
 - `push` copies only: files deleted locally are not deleted remotely.
-- `push` writes over the remote file in place, because PebbleHost's SFTP refuses the rename of a `.partial` upload. An upload that fails midway can leave the remote file truncated; restore it from the `backups/<ts>/remote/<path>` copy that the error names.
+- `push` writes over the remote file in place, because PebbleHost's SFTP refuses the rename of a `.partial` upload. Run the plugin's reload only after `push` reports success. An upload that fails midway can leave the remote file truncated. To restore it: `bin/mc pull <path>` (your edits move to `backups/<ts2>/local/<path>`), copy the `backups/<ts>/remote/<path>` that the error names over `server/<path>`, `bin/mc push <path>`, then copy your edits back from `backups/<ts2>/local/<path>` and push again.
 - `pull`, `diff` and `push` on the server root need `--all`; don't use it without the user asking.
 - While the server runs, plugins rewrite their data files at any time. Push config files, not whole data folders.
 

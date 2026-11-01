@@ -169,7 +169,7 @@ ENV
   run "$mc" push plugins/a.yml
   [ "$status" -eq 2 ]
   [[ $output == *"changed since the last pull"* ]]
-  run ! grep -q "copyto --inplace --ignore-times $MC_HOME/server" "$STUB_LOG"
+  run ! grep -q -- "$MC_HOME/server/plugins/a.yml pebble:plugins/a.yml" "$STUB_LOG"
 }
 
 @test "push backs up the remote copy before uploading" {
