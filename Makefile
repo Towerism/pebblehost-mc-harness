@@ -1,6 +1,6 @@
 .PHONY: test test-unit test-unit-bats test-unit-ts test-integration test-dev test-live lint hooks
 
-test: lint test-unit test-integration test-dev
+test: lint test-unit test-integration
 
 lint:
 	shellcheck bin/mc bin/path-guard bin/install-hooks bin/dev hooks/pre-commit hooks/pre-push hooks/pre-merge-commit docker/entrypoint.sh test/unit/stub/rclone test/integration/setup_suite.bash test/dev/prime test/dev/egress-probe test/dev/setup_suite.bash
@@ -21,8 +21,8 @@ test-unit-ts:
 test-integration:
 	bats --print-output-on-failure test/integration
 
-# Docker plus vanilla Purpur, downloaded once by test/dev/prime. Serial: the
-# tests share one pod.
+# Own tier, not in `make test`: Docker plus vanilla Purpur, downloaded once by
+# test/dev/prime. Serial: the tests share one pod.
 test-dev:
 	bats --print-output-on-failure test/dev
 

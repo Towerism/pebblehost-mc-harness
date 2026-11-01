@@ -42,7 +42,7 @@ Created at runtime and git-ignored: `server/` (local mirror of pulled server fil
 - Pods have no published port and no egress (an internal network without a gateway). Only `bin/dev join` publishes `127.0.0.1:<port>`, through a socat proxy.
 
 ### Testing Requirements
-`npm ci` once, then `make test` (lint, unit, integration, dev) before committing a change to `bin/`, `src/`, `hooks/`, `docker/` or `test/`. `make test-dev` needs Docker and, once, network for `test/dev/prime`. `make test-live` is read-only against the real server.
+`npm ci` once, then `make test` (lint, unit, integration) before committing a change to `bin/`, `src/`, `hooks/` or `test/`, and `make test-dev` too for `src/dev/`, `docker/` or `test/dev/`. It needs Docker and, once, network for `test/dev/prime`. `make test-live` is read-only against the real server.
 
 ## Dependencies
 
