@@ -13,7 +13,9 @@ const USAGE = `usage: dev <command> [--pod ID] [options]
   up [--fixtures DIR]... [--jar NAME] [--heap SIZE]
                           build mc-dev:<project>-<imageHash> from the committed server/
                           and boot the pod; refuses uncommitted server/ changes
-  rebuild [same options]  rebuild from HEAD, then recreate container and volume
+  rebuild [same options]  rebuild from HEAD, then recreate container and volume;
+                          keeps the last boot's fixtures and sqlite databases
+                          (--fixtures replaces both)
   restart                 restart the container on the same image; state kept
   reset                   re-apply /fixtures on the next boot, then restart
   down [--all]            remove the pod (--all: every pod of this checkout)
