@@ -14,8 +14,8 @@ triggers:
 A harness PR whose acceptance depends on the real server (sync time, boot parity, a bot joining the live copy) needs evidence from live before merge. The integration tests run against atmoz/sftp and a vanilla server. They cannot show PebbleHost's latency, its connection limits or the live plugin set.
 
 ## Inputs
-- The feature branch in its worktree, e.g. `/omc-dev/mc/pebblehost-mc-harness-feature-<n>-<slug>`. It does not need to be pushed.
-- The private server repo `/omc-dev/mc/survive-papitas-server`, whose `harness/` submodule is pinned in a commit.
+- The feature branch in its local worktree. It does not need to be pushed.
+- The private server repo (the one with `.harness-private`), whose `harness/` submodule is pinned to a tag or commit.
 - The user's OK for any live access beyond what the PR's spec already covers.
 
 ## Steps
