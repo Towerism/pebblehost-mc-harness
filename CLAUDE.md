@@ -2,6 +2,13 @@
 
 This repo lets Claude work on the files of one Minecraft server hosted on PebbleHost. Server files are reached over SFTP through `bin/mc`; there is no console or restart access yet.
 
+## Shared background
+
+- Glossary: `GLOSSARY.md` (`documentLanguage: en`). On term conflicts GLOSSARY.md wins; record a new term there the moment it settles, so specs, issues and code use one word per concept.
+- Delivery follows plan → execute → review → verify; `/oh-my-claudecode:launch` is opt-in, invoked explicitly.
+- Project skills: see "Project skills" below.
+- Deferred surfaces (`docs/adr/`, `docs/standards/`, `docs/business/`, `scripts/`, `.mcp.json`) are created on first use, and each gets an index line here when it is created. `scripts/` and `.mcp.json` also need an allowlist entry in `src/guard/paths.ts` first.
+
 ## Credentials: `.env`
 
 `.env` in the repo root holds the panel sign-in and server name. Never read, print, grep or source it: `bin/mc` loads it itself, and `.claude/settings.json` denies reading it. If `mc` reports a missing variable, ask the user to fix `.env`; the variable names are in `.env.example`:
