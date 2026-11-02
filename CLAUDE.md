@@ -84,6 +84,10 @@ The bare-text loop needs no pod and no `--fresh`: `bin/check run <id>` (red), co
 
 In the private server repo (the one with `.harness-private`, which has this harness as its `harness/` submodule), step 5 is different. Live writes go through `bin/check runbook push N` there, and `bin/mc push` refuses without `MC_RUNBOOK=1`. A bare `bin/mc push` is for using the harness alone, without a private repo. See `template/CLAUDE.md`.
 
+## Project skills
+
+`.omc/skills/<name>.md` holds OMC project skills; it is the only committed part of `.omc/` (`.gitignore` and the path guard allow exactly these files). `harness-live-evidence` times an unmerged harness change against live through the private server repo before its PR merges.
+
 ## Tests
 
 Run `npm ci` once first. `make test-unit` (stubbed rclone, path-guard hooks in temp repos and `node --test test/ts/`, about a second), `make test-integration` (one shared `atmoz/sftp` Docker container for the whole run), `make test-dev` (`bin/dev` against vanilla Purpur in Docker, about a minute; downloads Purpur once), `make lint` (shellcheck and `tsc --noEmit`), and `make test-live` for a read-only `ls` against the real server.

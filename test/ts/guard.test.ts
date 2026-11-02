@@ -23,6 +23,7 @@ const allowedPublic = [
   'CLAUDE.md',
   '.gitignore',
   '.env.example',
+  '.omc/skills/harness-live-evidence.md',
 ];
 
 for (const path of allowedPublic) {
@@ -31,7 +32,7 @@ for (const path of allowedPublic) {
   });
 }
 
-const notAllowlisted = ['README.txt', 'notes/x.md', 'lib/x.ts', '.claude/settings.local.json', '.omc/plans/p.md', 'node_modules/x/index.js', 'bukkit.yml'];
+const notAllowlisted = ['README.txt', 'notes/x.md', 'lib/x.ts', '.claude/settings.local.json', '.omc/plans/p.md', '.omc/state/x.json', '.omc/skills/sub/x.md', '.omc/skills/x.json', '.omc/skills/.md', '.OMC/Skills/x.md', '.omc/Skills/x.md', '.omc/skills/x.MD', 'node_modules/x/index.js', 'bukkit.yml'];
 
 for (const path of notAllowlisted) {
   test(`public refuses ${path} outside the allowlist`, () => {
@@ -64,6 +65,7 @@ const publicDeny: [string, string][] = [
   ['test/fixtures/Luckperms.MV.DB', 'denied: *.mv.db'],
   ['test/data.h2.db', 'denied: *.h2.db'],
   ['test/data.db', 'denied: *.db*'],
+  ['.omc/skills/x.db.md', 'denied: *.db*'],
   ['test/fixtures/b.DB', 'denied: *.db*'],
   ['docs/foo.Db', 'denied: *.db*'],
   ['test/fixtures/d.db-wal', 'denied: *.db*'],
@@ -92,6 +94,7 @@ const publicDeny: [string, string][] = [
   ['test/banned-players.json', 'denied: banned-*.json'],
   ['test/banned-ips.json', 'denied: banned-*.json'],
   ['.env', 'denied: .env*'],
+  ['.omc/skills/.env.md', 'denied: .env*'],
   ['.env.local', 'denied: .env*'],
   ['test/.env', 'denied: .env*'],
   ['test/.ENV', 'denied: .env*'],
@@ -161,6 +164,7 @@ const privateDeny: [string, string][] = [
   ['server/plugins/X/backup.tar.gz', 'denied: *.tar*'],
   ['server/logs/2026-10-31-1.log.gz', 'denied: *.gz'],
   ['.env', 'denied: .env*'],
+  ['.omc/skills/.env.md', 'denied: .env*'],
   ['.env.gitea', 'denied: .env*'],
   ['.envrc', 'denied: .env*'],
   ['server/.ENV', 'denied: .env*'],
