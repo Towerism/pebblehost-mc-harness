@@ -33,17 +33,23 @@ export function allowed(allow: string[], host: string): boolean {
 }
 
 export type Dial = (host: string, port: number) => Socket;
+export type EgressOpts = { dial?: Dial; headMs?: number; connectMs?: number; idleMs?: number; log?: (line: string) => void };
 
-// The request head must arrive within idleMs; a tunnel, once open, has no
-// time limit (downloads can be long).
-export function serveEgress(allow: string[], port = PORT, dial: Dial = (host, p) => connect(p, host), idleMs = 30_000, log: (line: string) => void = (line) => process.stdout.write(`${line}\n`)): Promise<Server> {
+// The request head must arrive within headMs and the upstream connect within
+// connectMs (else 502). An open tunnel with no byte either way for idleMs is
+// closed on both sides: an upstream flow that went dead (no ACK, no RST)
+// would otherwise hold a client with no read timeout, and the pod's boot with
+// it, until the kernel gives up some 15 minutes later. Either side closing or
+// failing closes the other.
+export function serveEgress(allow: string[], port = PORT, o: EgressOpts = {}): Promise<Server> {
+  const { dial = (host, p) => connect(p, host), headMs = 30_000, connectMs = 10_000, idleMs = 60_000, log = (line) => process.stdout.write(`${line}\n`) } = o;
   const server = createServer((c) => {
     let head = Buffer.alloc(0);
     const deny = (status: string, why: string) => {
       log(`deny ${why}`);
       c.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     };
-    c.setTimeout(idleMs, () => c.destroy());
+    c.setTimeout(headMs, () => c.destroy());
     c.on('error', () => c.destroy());
     const onData = (b: Buffer) => {
       head = Buffer.concat([head, b]);
@@ -65,10 +71,24 @@ export function serveEgress(allow: string[], port = PORT, dial: Dial = (host, p)
       if (!allowed(allow, host)) return deny('403 Forbidden', `${host}:443: not in pod-egress`);
       const up = dial(host, 443);
       let open = false;
+      // Socket timeouts count reads and writes alike: a tunnel moving data
+      // one way keeps both sides alive.
+      const idle = () => {
+        log(`close ${host}:443: idle ${idleMs}ms`);
+        up.destroy();
+        c.destroy();
+      };
+      up.setTimeout(connectMs, () => {
+        if (open) return idle();
+        up.destroy();
+        deny('502 Bad Gateway', `${host}:443: no connect within ${connectMs}ms`);
+      });
       up.once('connect', () => {
         open = true;
         log(`allow ${host}:443`);
-        c.setTimeout(0);
+        up.setTimeout(idleMs);
+        c.removeAllListeners('timeout');
+        c.setTimeout(idleMs, idle);
         c.write('HTTP/1.1 200 Connection established\r\n\r\n');
         const rest = head.subarray(end + 4);
         if (rest.length > 0) up.write(rest);
@@ -78,6 +98,7 @@ export function serveEgress(allow: string[], port = PORT, dial: Dial = (host, p)
       });
       up.on('error', (e) => (open ? c.destroy() : deny('502 Bad Gateway', `${host}:443: ${e.message}`)));
       up.on('close', () => open && c.destroy());
+      // A client gone before the connect leaves no dial behind.
       c.on('close', () => up.destroy());
     };
     c.on('data', onData);

@@ -3,8 +3,8 @@
 // stands in for every allowed host (the dial is injected).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { connect, createServer, type AddressInfo, type Server } from 'node:net';
-import { allowed, parseEgress, serveEgress } from '../../src/relay/egress.ts';
+import { connect, createServer, Socket, type AddressInfo, type Server } from 'node:net';
+import { allowed, parseEgress, serveEgress, type EgressOpts } from '../../src/relay/egress.ts';
 
 test('parseEgress: hosts and .suffixes, comments and blanks skipped, case folded, sorted and unique', () => {
   assert.deepEqual(parseEgress(''), []);
@@ -39,12 +39,25 @@ async function upstream(): Promise<{ server: Server; port: number }> {
   return { server, port: (server.address() as AddressInfo).port };
 }
 
-async function proxy(allow: string[], up: number, idleMs = 30_000) {
+async function proxy(allow: string[], up: number, o: Omit<EgressOpts, 'dial' | 'log'> & { dial?: () => Socket } = {}) {
   const dials: string[] = [];
   const logs: string[] = [];
-  const server = await serveEgress(allow, 0, (host, port) => (dials.push(`${host}:${port}`), connect(up, '127.0.0.1')), idleMs, (l) => logs.push(l));
+  const server = await serveEgress(allow, 0, { ...o, dial: (host, port) => (dials.push(`${host}:${port}`), o.dial ? o.dial() : connect(up, '127.0.0.1')), log: (l) => logs.push(l) });
   return { server, port: (server.address() as AddressInfo).port, dials, logs };
 }
+
+// Open a tunnel to `vcs.example.org` through the proxy; resolves once the
+// 200 is in.
+function tunnel(port: number): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const c = connect(port, '127.0.0.1');
+    c.once('data', (b) => (String(b).startsWith('HTTP/1.1 200') ? resolve(c) : reject(new Error(String(b)))));
+    c.on('error', reject);
+    c.write('CONNECT vcs.example.org:443 HTTP/1.1\r\n\r\n');
+  });
+}
+
+const closed = (s: Socket) => new Promise<void>((r) => (s.destroyed ? r() : s.once('close', () => r())));
 
 // Send `request`, then read until the proxy closes or `until` matches.
 function exchange(port: number, request: string, until?: RegExp, then?: string): Promise<string> {
@@ -103,7 +116,7 @@ test('serveEgress answers 403 to an unlisted host, another port, plain HTTP and 
 
 test('serveEgress refuses an oversized head and drops a client that never finishes one', async () => {
   const up = await upstream();
-  const px = await proxy(['vcs.example.org'], up.port, 200);
+  const px = await proxy(['vcs.example.org'], up.port, { headMs: 200 });
   try {
     assert.match(await exchange(px.port, `CONNECT vcs.example.org:443 HTTP/1.1\r\nX: ${'a'.repeat(9000)}`), /^HTTP\/1\.1 431 /);
     assert.equal(await exchange(px.port, 'CONNECT vcs.example.org:443 HTTP/1.1\r\n'), '');
@@ -124,5 +137,78 @@ test('serveEgress answers 502 when the allowed host cannot be reached', async ()
     assert.match(await exchange(px.port, 'CONNECT vcs.example.org:443 HTTP/1.1\r\n\r\n'), /^HTTP\/1\.1 502 Bad Gateway\r\n/);
   } finally {
     px.server.close();
+  }
+});
+
+test('serveEgress answers 502 when the upstream connect does not finish within connectMs', async () => {
+  // A socket that never connects stands in for a SYN nobody answers.
+  const px = await proxy(['vcs.example.org'], 0, { connectMs: 150, dial: () => new Socket() });
+  try {
+    const t0 = Date.now();
+    assert.match(await exchange(px.port, 'CONNECT vcs.example.org:443 HTTP/1.1\r\n\r\n'), /^HTTP\/1\.1 502 Bad Gateway\r\n/);
+    assert.ok(Date.now() - t0 < 2000);
+    assert.deepEqual(px.logs, ['deny vcs.example.org:443: no connect within 150ms']);
+  } finally {
+    px.server.close();
+  }
+});
+
+test('serveEgress closes both sides of a tunnel with no byte either way for idleMs', async () => {
+  // The upstream takes the client's bytes and never answers: a dead flow.
+  const ups: Socket[] = [];
+  const up = createServer((s) => (ups.push(s), s.resume()));
+  await new Promise<void>((r) => up.listen(0, '127.0.0.1', r));
+  const px = await proxy(['vcs.example.org'], (up.address() as AddressInfo).port, { idleMs: 200 });
+  try {
+    const c = await tunnel(px.port);
+    c.write('client hello');
+    const t0 = Date.now();
+    await closed(c);
+    assert.ok(Date.now() - t0 < 2000);
+    await closed(ups[0]);
+    assert.deepEqual(px.logs, ['allow vcs.example.org:443', 'close vcs.example.org:443: idle 200ms']);
+  } finally {
+    px.server.close();
+    up.close();
+  }
+});
+
+test('serveEgress keeps a tunnel that moves bytes one way open past idleMs', async () => {
+  // A slow download: one byte every 50ms for 500ms, then the upstream ends.
+  const up = createServer((s) => {
+    let n = 0;
+    const t = setInterval(() => (++n === 10 ? (clearInterval(t), s.end('.')) : s.write('.')), 50);
+    s.on('close', () => clearInterval(t));
+  });
+  await new Promise<void>((r) => up.listen(0, '127.0.0.1', r));
+  const px = await proxy(['vcs.example.org'], (up.address() as AddressInfo).port, { idleMs: 200 });
+  try {
+    const c = await tunnel(px.port);
+    let got = '';
+    c.on('data', (b) => (got += b));
+    await closed(c);
+    assert.equal(got, '.'.repeat(10));
+    assert.ok(!px.logs.some((l) => l.startsWith('close ')));
+  } finally {
+    px.server.close();
+    up.close();
+  }
+});
+
+test('serveEgress closes the client when the upstream goes, and the upstream when the client goes', async () => {
+  const ups: Socket[] = [];
+  const up = createServer((s) => ups.push(s));
+  await new Promise<void>((r) => up.listen(0, '127.0.0.1', r));
+  const px = await proxy(['vcs.example.org'], (up.address() as AddressInfo).port);
+  try {
+    const a = await tunnel(px.port);
+    ups[0].destroy();
+    await closed(a);
+    const b = await tunnel(px.port);
+    b.destroy();
+    await closed(ups[1]);
+  } finally {
+    px.server.close();
+    up.close();
   }
 });
