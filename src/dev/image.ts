@@ -12,7 +12,7 @@ export const HARNESS_ROOT = resolve(import.meta.dirname, '../..');
 // What the harness puts into an image besides the server tree.
 export const HARNESS_INPUTS = ['docker/server.Dockerfile', 'docker/entrypoint.sh', 'src/dev/overrides.ts'];
 // What goes into the relay image; their hash is its tag.
-export const RELAY_INPUTS = ['docker/relay.Dockerfile', 'docker/relay/package.json', 'docker/relay/package-lock.json', 'src/relay/daemon.ts', 'src/relay/client.ts', 'src/relay/rcon.ts', 'src/relay/bots.ts'];
+export const RELAY_INPUTS = ['docker/relay.Dockerfile', 'docker/relay/package.json', 'docker/relay/package-lock.json', 'src/relay/daemon.ts', 'src/relay/client.ts', 'src/relay/rcon.ts', 'src/relay/bots.ts', 'src/relay/egress.ts'];
 
 export type Source = { kind: 'git'; root: string; commit: string } | { kind: 'dir'; root: string };
 // source=archive images come from a commit; source=dir images from a plain

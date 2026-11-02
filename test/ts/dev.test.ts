@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { DevError, type Docker } from '../../src/dev/docker.ts';
 import { build, buildContext, chooseJar, dirHash, dirtyHarness, toolHash, HARNESS_INPUTS, RELAY_INPUTS, HARNESS_ROOT, identity, pruneImages, source, stepCached } from '../../src/dev/image.ts';
 import { applyOverrides, OVERRIDES, setProperty, setYaml } from '../../src/dev/overrides.ts';
-import { bootTimeout, createJoin, createPod, EGRESS_SINKS, formatBootReport, mergeFixtures, names, parseBootReport, podOf, removePod } from '../../src/dev/pod.ts';
+import { bootTimeout, createJoin, createPod, EGRESS_SINKS, egressHash, formatBootReport, javaProxyOpts, mergeFixtures, names, parseBootReport, podOf, readEgress, removePod } from '../../src/dev/pod.ts';
 import { podFile } from '../../src/dev/cli.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dev-test-'));
@@ -347,6 +347,63 @@ test('createPod: internal IPv4-only network without a gateway, labelled volume, 
   const mem = recorder();
   createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false, commit: 'c0ffee', source: 'archive', memory: '6g' }, mem.d);
   assert.ok(mem.calls[2].join('\0').includes(['--memory', '6g'].join('\0')));
+});
+
+test('createPod with pod-egress: a locked-down proxy on its own network joined to the pod one, the JVM pointed at it', () => {
+  const p = podOf(tmp(), 'dev');
+  const { d, calls } = recorder();
+  createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false, commit: 'c0ffee', source: 'archive', egress: ['.dropboxusercontent.com', 'github.com'] }, d);
+  const labels = ['--label', `mc-harness.project=${p.project}`, '--label', 'mc-harness.pod=dev'];
+  const prefix = `mc-${p.project}-dev`;
+  assert.equal(calls[0][2], '--internal');
+  // The proxy's own network has a gateway; the pod's stays internal.
+  assert.deepEqual(calls[1], ['network', 'create', '--ipv6=false', ...labels, `${prefix}-egressnet`]);
+  const proxy = calls[2];
+  assert.deepEqual(proxy.slice(0, 7), ['create', '--name', `${prefix}-egress`, '--hostname', 'egress-dev', '--network', `${prefix}-egressnet`]);
+  for (const pair of [labels.slice(0, 2), labels.slice(2), ['--init'], ['-e', 'EGRESS_ALLOW=.dropboxusercontent.com,github.com'], ['--user', '1000:1000'], ['--read-only'], ['--cap-drop', 'ALL'], ['--security-opt', 'no-new-privileges'], ['--pids-limit', '256'], ['--entrypoint', 'node', 'mc-relay:r1', '/relay/egress.ts']]) {
+    assert.ok(proxy.join('\0').includes(pair.join('\0')), pair.join(' '));
+  }
+  assert.ok(!proxy.some((a) => a === '-p' || a.startsWith('--publish') || a.includes('pw')));
+  assert.deepEqual(calls.slice(3, 5), [['network', 'connect', `${prefix}-net`, `${prefix}-egress`], ['start', `${prefix}-egress`]]);
+  const run = calls[6];
+  assert.equal(run[0], 'run');
+  const opts = run.find((a) => a.startsWith('JAVA_TOOL_OPTIONS='));
+  assert.equal(opts, `JAVA_TOOL_OPTIONS=${javaProxyOpts(p)}`);
+  const flags = (opts as string).slice('JAVA_TOOL_OPTIONS='.length).split(' ');
+  for (const flag of [`-Dhttps.proxyHost=${prefix}-egress`, '-Dhttps.proxyPort=3128', `-Dhttp.proxyHost=${prefix}-egress`, '-Dhttp.proxyPort=3128']) assert.ok(flags.includes(flag), flag);
+  const direct = flags.find((f) => f.startsWith('-Dhttp.nonProxyHosts='))?.split('=')[1].split('|') ?? [];
+  for (const host of ['localhost', '127.*', `${prefix}-server`, `${prefix}-relay`]) assert.ok(direct.includes(host), host);
+  // An allowed sink is no longer pinned to 127.0.0.1; the others still are.
+  assert.ok(!run.includes('github.com:127.0.0.1'));
+  assert.ok(run.includes('bstats.org:127.0.0.1'));
+  assert.equal(run.filter((a) => a === '--add-host').length, EGRESS_SINKS.length - 1);
+  assert.equal(calls.length, 8);
+  // Without hosts: no proxy, no network, no JVM flags.
+  for (const egress of [undefined, []]) {
+    const none = recorder();
+    createPod(p, { tag: 'mc-dev:abc', relayTag: 'mc-relay:r1', jar: 'purpur.jar', fixtures: '/fx', fixturesHash: 'f00', rconPassword: 'pw', generation: 'g1', fresh: false, commit: 'c0ffee', source: 'archive', egress }, none.d);
+    assert.equal(none.calls.length, 4);
+    assert.ok(!none.calls.flat().some((a) => a.includes('egress') || a.startsWith('JAVA_TOOL_OPTIONS')));
+  }
+});
+
+test('readEgress: absent or comment-only is [], entries parsed, a bad line refused naming the file and line', () => {
+  const root = tmp();
+  assert.deepEqual(readEgress(root), []);
+  write(root, { 'pod-egress': '# none yet\n\n' });
+  assert.deepEqual(readEgress(root), []);
+  write(root, { 'pod-egress': 'vcs.example.org\n.DropboxUserContent.com  # packs\n' });
+  assert.deepEqual(readEgress(root), ['.dropboxusercontent.com', 'vcs.example.org']);
+  write(root, { 'pod-egress': 'ok.example.org\nhttps://evil.example.org/\n' });
+  assert.throws(() => readEgress(root), (e) => e instanceof DevError && e.message.includes(join(root, 'pod-egress')) && e.message.includes('line 2: "https://evil.example.org/"'));
+});
+
+test('egressHash leaves the fixtures hash alone without hosts and changes it with each list', () => {
+  assert.equal(egressHash('f00', []), 'f00');
+  const a = egressHash('f00', ['a.example.org']);
+  assert.match(a, /^[0-9a-f]{64}$/);
+  assert.notEqual(a, egressHash('f00', ['b.example.org']));
+  assert.notEqual(a, egressHash('f01', ['a.example.org']));
 });
 
 test('createJoin: own labelled network, locked-down socat, 127.0.0.1 only, then joined to the pod network', () => {

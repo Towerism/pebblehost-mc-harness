@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { inventory, issueBranch, refuseSkipped, seedData, syncLive } from '../sync/sync.ts';
 import { DevError, docker as d, fail, must } from './docker.ts';
 import { build, buildRelay, chooseJar, dirtyHarness, dirtyServer, HARNESS_ROOT, labels, privateDir, pruneImages, source } from './image.ts';
-import { bootTimeout, createJoin, createPod, formatBootReport, killOrphanSuite, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
+import { bootTimeout, createJoin, createPod, egressHash, formatBootReport, killOrphanSuite, markExplored, mergeFixtures, names, parseBootReport, podOf, readBoots, readEgress, readPodFile, recordBoot, relayRequest, removePod, SOCAT_IMAGE, state, waitDone, type Pod, type PodFile } from './pod.ts';
 
 const USAGE = `usage: dev <command> [--pod ID] [options]
 
@@ -52,6 +52,9 @@ uncommitted harness image or relay changes too.
 --pod defaults to dev. --jar picks the server jar when server/ has several
 at its root; --heap sets -Xms/-Xmx (both are kept for rebuild). --timeout S
 bounds each boot (default 3x the median of the pod's last boots, or 600s).
+Pods have no network unless $MC_HOME/pod-egress lists hosts (one per line,
+# comments, .suffix for subdomains): up, rebuild and seed then add a proxy
+that lets the server's JVM reach those hosts on port 443 only.
 server/ comes from $MC_HOME (default: the harness root): git archive of HEAD
 when server/ is tracked, else a plain copy. Exit codes: 0 ok, 2 error.`;
 
@@ -120,6 +123,7 @@ function requireServer(p: Pod): string {
 export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: boolean, fresh = false): { cacheHit: boolean; buildSeconds: number; bootSeconds: number } {
   const src = refuseDirty(p.root);
   const jar = chooseJar(src, pf.jar);
+  const egress = readEgress(p.root);
   const harness = dirtyHarness();
   if (harness.length > 0) fail(`the harness has uncommitted image or relay changes; commit them first:\n${harness.join('\n')}`);
   const t0 = Date.now();
@@ -130,14 +134,15 @@ export function boot(p: Pod, pf: PodFile, timeout: number | undefined, replace: 
   for (const note of built.notes) say(`override: ${note}`);
   const n = names(p);
   for (const dir of [join(p.root, '.dev'), join(p.root, '.dev', 'pods'), n.dir]) privateDir(dir);
-  const fixturesHash = mergeFixtures(pf.fixtures, join(n.dir, 'fixtures'), pf.sqlite);
+  const fixturesHash = egressHash(mergeFixtures(pf.fixtures, join(n.dir, 'fixtures'), pf.sqlite), egress);
   if (replace) removePod(p, false, d);
   writeFileSync(join(n.dir, 'pod.json'), `${JSON.stringify(pf)}\n`, { mode: 0o600 });
   chmodSync(join(n.dir, 'pod.json'), 0o600);
   const since = Date.now() / 1000;
   const javaOpts = process.env.MC_JAVA_OPTS || (pf.heap ? `-Xms${pf.heap} -Xmx${pf.heap}` : undefined);
-  const spec = { tag: built.tag, relayTag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), generation: randomUUID(), fresh, commit: built.id.commit, source: built.id.source, javaOpts, memory: process.env.MC_DEV_MEMORY };
+  const spec = { tag: built.tag, relayTag, jar, fixtures: join(n.dir, 'fixtures'), fixturesHash, rconPassword: randomBytes(18).toString('base64url'), generation: randomUUID(), fresh, commit: built.id.commit, source: built.id.source, javaOpts, memory: process.env.MC_DEV_MEMORY, egress };
   createPod(p, spec, d);
+  if (egress.length > 0) say(`egress: ${egress.join(', ')} through ${n.egress} (docker logs ${n.egress})`);
   const secs = waitBoot(p, since, timeout);
   const pruned = pruneImages(d, p.project, [built.tag, relayTag]);
   const from = built.id.source === 'archive' ? `commit ${built.id.commit}` : 'plain server/ copy, not a commit';

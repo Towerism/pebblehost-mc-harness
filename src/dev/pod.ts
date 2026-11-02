@@ -1,12 +1,16 @@
 // A pod: one server container on its own internal network (no gateway, so no
 // egress), a named volume at /server and a read-only /fixtures, plus the relay
-// container (src/relay/) on that network only, which holds the RCON connection. Everything
-// carries the labels mc-harness.project and mc-harness.pod, which down uses.
+// container (src/relay/) on that network only, which holds the RCON connection.
+// When the project's pod-egress lists hosts, an egress proxy (src/relay/egress.ts)
+// joins that network and a network of its own, and the server's JVM is pointed
+// at it. Everything carries the labels mc-harness.project and mc-harness.pod,
+// which down uses.
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { constants as sqliteConst, DatabaseSync } from 'node:sqlite';
 import { fail, must, type Docker } from './docker.ts';
+import { allowed, parseEgress, PORT as EGRESS_PORT } from '../relay/egress.ts';
 import { dirHash, privateDir, walk } from './image.ts';
 
 export const SOCAT_IMAGE = 'alpine/socat@sha256:466c8a0383e16463fabdb7df01008292fb78d07da60224a46cb5d3142ce122ed';
@@ -14,7 +18,8 @@ export const MARKER = '/server/.mc-harness-seeded';
 
 // Update, metrics and download hosts plugins call at boot. The pod has no
 // route out anyway; pointing them at 127.0.0.1 makes each call fail at once
-// (connection refused) instead of waiting on a DNS timeout.
+// (connection refused) instead of waiting on a DNS timeout. A host pod-egress
+// allows is left out.
 export const EGRESS_SINKS = [
   'bstats.org',
   'api.spigotmc.org',
@@ -63,11 +68,38 @@ export function podOf(root: string, pod: string): Pod {
 
 export function names(p: Pod) {
   const prefix = `mc-${p.project}-${p.pod}`;
-  return { net: `${prefix}-net`, vol: `${prefix}-server`, server: `${prefix}-server`, relay: `${prefix}-relay`, join: `${prefix}-join`, joinNet: `${prefix}-joinnet`, dir: join(p.root, '.dev', 'pods', p.pod) };
+  return { net: `${prefix}-net`, vol: `${prefix}-server`, server: `${prefix}-server`, relay: `${prefix}-relay`, egress: `${prefix}-egress`, egressNet: `${prefix}-egressnet`, join: `${prefix}-join`, joinNet: `${prefix}-joinnet`, dir: join(p.root, '.dev', 'pods', p.pod) };
 }
 
 function labelArgs(p: Pod): string[] {
   return ['--label', `mc-harness.project=${p.project}`, '--label', `mc-harness.pod=${p.pod}`];
+}
+
+// The project's pod-egress (see parseEgress), or [] when it is absent: the
+// pod then stays without any way out.
+export function readEgress(root: string): string[] {
+  const f = join(root, 'pod-egress');
+  if (!existsSync(f)) return [];
+  try {
+    return parseEgress(readFileSync(f, 'utf8'));
+  } catch (e) {
+    return fail(`${f}: ${(e as Error).message}`);
+  }
+}
+
+// The fixtures hash extended by the allowlist when there is one, so records
+// and the gate (G6) see a pod booted with other egress as other fixtures.
+export function egressHash(fixturesHash: string, egress: string[]): string {
+  return egress.length === 0 ? fixturesHash : createHash('sha256').update(`${fixturesHash}\negress ${egress.join(' ')}\n`).digest('hex');
+}
+
+// JVM flags that send Java's HTTP(S) clients through the egress proxy; the
+// pod's own containers and loopback stay direct. JAVA_TOOL_OPTIONS reaches
+// the JVM whatever JAVA_OPTS the entrypoint passes.
+export function javaProxyOpts(p: Pod): string {
+  const n = names(p);
+  const direct = ['localhost', '127.*', '[::1]', n.server, n.relay, `mc-${p.pod}`, `relay-${p.pod}`].join('|');
+  return [`-Dhttps.proxyHost=${n.egress}`, `-Dhttps.proxyPort=${EGRESS_PORT}`, `-Dhttp.proxyHost=${n.egress}`, `-Dhttp.proxyPort=${EGRESS_PORT}`, `-Dhttp.nonProxyHosts=${direct}`].join(' ');
 }
 
 // Merge fixture directories into dest; the same path from two sources with
@@ -155,19 +187,34 @@ function buildFixtures(sources: string[], dest: string, sqlite: Record<string, s
 // --fresh. Both are labels on the volume and the server container. commit
 // and source are the checkout this boot came from: on the container they
 // override the image's, which name whichever commit first built that tree.
-export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; generation: string; fresh: boolean; commit: string; source: string; javaOpts?: string; memory?: string };
+// egress: the parsed pod-egress; empty or absent, no proxy.
+export type Spec = { tag: string; relayTag: string; jar: string; fixtures: string; fixturesHash: string; rconPassword: string; generation: string; fresh: boolean; commit: string; source: string; javaOpts?: string; memory?: string; egress?: string[] };
 
-// Network, volume, server and relay. No published port: bin/dev join adds a
-// proxy. The RCON password reaches docker through its environment, never argv.
+// Network, egress proxy (only with hosts in pod-egress), volume, server and
+// relay. No published port: bin/dev join adds a proxy. The RCON password
+// reaches docker through its environment, never argv.
 export function createPod(p: Pod, s: Spec, d: Docker): void {
   const n = names(p);
+  const egress = s.egress ?? [];
   must(d, ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', ...labelArgs(p), n.net]);
+  if (egress.length > 0) {
+    // Created on its own network with a gateway, joined to the pod's before
+    // it starts (like createJoin); locked down like the relay, whose image
+    // holds it.
+    must(d, ['network', 'create', '--ipv6=false', ...labelArgs(p), n.egressNet]);
+    const proxy = ['create', '--name', n.egress, '--hostname', `egress-${p.pod}`, '--network', n.egressNet, ...labelArgs(p), '--init', '-e', `EGRESS_ALLOW=${egress.join(',')}`];
+    proxy.push('--user', '1000:1000', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '256', '--entrypoint', 'node', s.relayTag, '/relay/egress.ts');
+    must(d, proxy);
+    must(d, ['network', 'connect', n.net, n.egress]);
+    must(d, ['start', n.egress]);
+  }
   const gen = ['--label', `mc-harness.generation=${s.generation}`, '--label', `mc-harness.fresh=${s.fresh}`];
   must(d, ['volume', 'create', ...labelArgs(p), ...gen, n.vol]);
   const run = ['run', '-d', '--name', n.server, '--hostname', `mc-${p.pod}`, '--network', n.net, ...labelArgs(p)];
   run.push('--label', `mc-harness.fixtures=${s.fixturesHash}`, ...gen, '--label', `mc-harness.commit=${s.commit}`, '--label', `mc-harness.source=${s.source}`);
   run.push('-v', `${n.vol}:/server`, '-v', `${s.fixtures}:/fixtures:ro`, '-e', 'RCON_PASSWORD', '-e', `MC_JAR=${s.jar}`);
-  for (const host of EGRESS_SINKS) run.push('--add-host', `${host}:127.0.0.1`);
+  for (const host of EGRESS_SINKS) if (!allowed(egress, host)) run.push('--add-host', `${host}:127.0.0.1`);
+  if (egress.length > 0) run.push('-e', `JAVA_TOOL_OPTIONS=${javaProxyOpts(p)}`);
   if (s.javaOpts) run.push('-e', `JAVA_OPTS=${s.javaOpts}`);
   if (s.memory) run.push('--memory', s.memory);
   run.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '4096', '--stop-timeout', '60', s.tag);
