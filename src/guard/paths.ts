@@ -74,7 +74,9 @@ export function classify(path: string, size: number, profile: Profile): string |
   if (profile === 'private') return denied(segments, PRIVATE_DENY);
   const deny = denied(segments, PUBLIC_DENY);
   if (deny) return deny;
-  const allowed = segments.length === 1 ? PUBLIC_FILES.has(path) || path.endsWith('.md') : PUBLIC_DIRS.has(segments[0]) || PUBLIC_FILES.has(path);
+  // OMC project skills are the one committable part of .omc/: .omc/skills/<name>.md only.
+  const skill = segments.length === 3 && segments[0] === '.omc' && segments[1] === 'skills' && base.endsWith('.md');
+  const allowed = segments.length === 1 ? PUBLIC_FILES.has(path) || path.endsWith('.md') : PUBLIC_DIRS.has(segments[0]) || PUBLIC_FILES.has(path) || skill;
   if (!allowed) return 'not in the public allowlist';
   if (size > MAX_BYTES) return `${size} bytes, over the ${MAX_BYTES}-byte cap`;
   return null;
