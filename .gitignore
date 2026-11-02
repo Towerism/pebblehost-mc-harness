@@ -4,6 +4,9 @@
 server/
 backups/
 .mc/
-.omc/
+# Keep OMC state local, commit project skills (!.omc/ undoes a global ignore).
+!.omc/
+.omc/*
+!.omc/skills/
 node_modules/
 .dev/
