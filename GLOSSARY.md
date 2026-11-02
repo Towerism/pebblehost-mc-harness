@@ -34,7 +34,7 @@ One entry per term: definition, boundaries, one resolved ambiguity. Agents write
 - Definition: a server issue taken through the loop in order: a red run before the fix, then a green, a confirmed gate pass, and `bin/check runbook push N` (private repo) putting the fix on live.
 - Boundary: is what the gate-rule freeze (`CLAUDE.md`, #30) counts; not an issue whose check was written after the fix was already on live, nor a fix pushed with a bare `bin/mc push`.
 - Avoid: "real issue" when the order of red and fix is what matters.
-- Resolved ambiguity: a live-target run (`--target live`) never stands in for its red or green; only gate-counted records do.
+- Resolved ambiguity: an issue whose fix reached live before its red does not count, even if it later gets a gate pass.
 
 ## explored
 - Definition: a pod volume touched by `bin/dev console`, `bot` (except `list`) or `join`, marked by `/server/.mc-harness-explored` inside the volume.

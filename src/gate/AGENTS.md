@@ -16,7 +16,7 @@ The red/green gate for recorded checks: rules G1-G10 over the run records and a 
 ## For AI Agents
 
 ### Working In This Directory
-- Frozen (#30): no new gate rules, record fields, refusal conditions or suite orchestration in `bin/check` until 3 forward issues are done; bug fixes, flaky-check fixes and docs only. See "Freeze" in `../../CLAUDE.md`.
+- Frozen (#30): read "Freeze" in `../../CLAUDE.md` before adding anything to `bin/check`.
 - The rules, as coded: G1 both runs are dev target and the check's kind and issue, red older than green; G2 the check tree is unchanged red/green/HEAD and clean; G3 the green booted a strict descendant commit of the red's; G4 `server/` changed between them (bare-text: every file the check reads); G5 e2e images built from `archive` source with matching tree and image hashes, same harness hash, and same check/gate code (`toolHash`) for both kinds; G6 same fixtures hash; G7 HEAD descends from the green and `server/` did not change after it; G8 bare-text static check; G9 e2e: red and green were the first (`runIndex` 0), non-`concurrent` run on their volume, the red's volume was `fresh`, neither volume `explored`; G10 both record lines are committed as is in `.verify/runs/issue-N.jsonl` at HEAD.
 - A confirm counts only as run `green.runIndex + 1` on the green's volume or run 0 on a new one (e2e), after the green, with the same fixtures, not explored and not concurrent. `confirmCheck` is the single place that decides it; `bin/check gate` pre-checks the same slot before running anything.
 - `postmortem` and `runbook` keep no gate state: `src/check/cli.ts` (`confirmedPass`) re-evaluates the gate, requires a confirm and requires it committed (G10) before calling `writeDoc`.
