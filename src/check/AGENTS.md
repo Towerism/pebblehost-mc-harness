@@ -24,6 +24,7 @@
 ## For AI Agents
 
 ### Working In This Directory
+- Frozen (#30): no new gate rules, record fields, refusal conditions or suite orchestration in `bin/check` until 3 forward issues are done; bug fixes, flaky-check fixes and docs only. See "Freeze" in `../../CLAUDE.md`.
 - `bin/check suite` runs `runSuite` in a detached child (`MC_SUITE_CHILD=1`; `suiteParent` in `cli.ts`). On SIGINT/SIGTERM the parent kills the child's process group, sweeps the suite pods until a pass finds none (a docker call the kill cut short can still create a resource), and exits 130/143. At start it kills an orphaned child recorded in `.dev/suite.pid` (`killOrphanSuite` in `../dev/pod.ts`, only when `/proc/<pid>/environ` shows `MC_SUITE_CHILD=1` and this `MC_HOME`; `bin/dev down --all` does the same) and removes leftover suite pods.
 - `bin/check run` runs only the `*.test.ts` of the committed `checks/<id>` tree and refuses uncommitted changes and any untracked or ignored file in that directory. A bare-text directory may hold only `profile.json` and `*.test.ts`.
 - `node --test` starts with an allow-listed env (`KEEP_ENV` in `run.ts`: `PATH`, `HOME`, `TZ`, locale, `TMPDIR`, docker variables) plus `MC_HOME`, `MC_POD`, `MC_TARGET`, `MC_COMMIT` and the profile-derived `MC_NEEDS`, `MC_RESTART_OK`, `MC_CHECK_DIR`: no `NODE_OPTIONS` or other `NODE_*` from the caller.
